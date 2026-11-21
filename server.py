@@ -168,28 +168,20 @@ def analyze_market(candles, recent_ticks):
     put_score = sum(put_checks)
 
     # Вхід дозволяється ТІЛЬКИ на свіжому 1-му тіку (not_exhausted) + мінімум 6 із 8 індикаторів!
-    if call_score >= 6 and call_score > put_score and instant_bull_tick and not_exhausted_bull and prev_bulls < 3:
-        return {
-            "status": "SIGNAL",
-            "direction": "CALL",
-            "price": closes[-1],
-            "rsi": round(rsi, 1),
-            "score": f"{call_score}/8 (Старт імпульсу)",
-            "sec": sec_in_minute
-        }
+    call_score = sum(call_checks)
+    put_score = sum(put_checks)
 
-    if put_score >= 6 and put_score > call_score and instant_bear_tick and not_exhausted_bear and prev_bears < 3:
-        return {
-            "status": "SIGNAL",
-            "direction": "PUT",
-            "price": closes[-1],
-            "rsi": round(rsi, 1),
-            "score": f"{put_score}/8 (Старт імпульсу)",
-            "sec": sec_in_minute
-        }
+    if call_score == 7:
+        return {"status": "SIGNAL", "direction": "CALL", "price": closes[-1], "rsi": round(rsi, 1), "score": "7/7", "sec": sec_in_minute}
+    if put_score == 7:
+        return {"status": "SIGNAL", "direction": "PUT", "price": closes[-1], "rsi": round(rsi, 1), "score": "7/7", "sec": sec_in_minute}
+
+    if call_score == 6 and call_checks[0] and call_checks[6]:
+        return {"status": "PREPARE", "direction": "CALL", "price": closes[-1], "rsi": round(rsi, 1), "score": "6/7", "sec": sec_in_minute}
+    if put_score == 6 and put_checks[0] and put_checks[6]:
+        return {"status": "PREPARE", "direction": "PUT", "price": closes[-1], "rsi": round(rsi, 1), "score": "6/7", "sec": sec_in_minute}
 
     return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
-
 
 def parse_assets(raw_assets):
     result = {}
