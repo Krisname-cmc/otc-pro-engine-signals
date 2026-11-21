@@ -62,20 +62,24 @@ def calculate_rsi(closes, period=5):
 
 
 def analyze_market(candles, recent_ticks):
-    if not candles or len(candles) < 10:
-        return {"status": "WARMING", "collected": len(candles), "needed": 10}
+    if not candles or len(candles) < 14:
+        return {"status": "WARMING", "collected": len(candles), "needed": 14}
 
     sec_in_minute = int(time.time()) % 60
-    # Входимо на старті та в першій половині активного руху (з 2-ї по 45-ту секунду)
-    if sec_in_minute < 2 or sec_in_minute > 45:
-        return {"status": "WAIT_CANDLE", "wait_sec": (2 - sec_in_minute) if sec_in_minute < 2 else (60 - sec_in_minute), "sec": sec_in_minute}
+    # Входимо на старті та в активній фазі свічки (з 2-ї по 46-ту секунду)
+    if sec_in_minute < 2 or sec_in_minute > 46:
+        return {
+            "status": "WAIT_CANDLE",
+            "wait_sec": (2 - sec_in_minute) if sec_in_minute < 2 else (60 - sec_in_minute),
+            "sec": sec_in_minute
+        }
 
     opens = [float(x["open"]) for x in candles]
     highs = [float(x["high"]) for x in candles]
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. ШВИДКИЙ ТРЕНД EMA (3, 6, 10)
+    # 1. ТРЕНДОВІ EMA (3, 6, 10)
     ema3 = ema(closes, 3)
     ema6 = ema(closes, 6)
     ema10 = ema(closes, 10)
@@ -83,12 +87,42 @@ def analyze_market(candles, recent_ticks):
     bull_ema = ema3[-1] > ema6[-1] and ema3[-1] > ema3[-2] and closes[-1] > ema10[-1]
     bear_ema = ema3[-1] < ema6[-1] and ema3[-1] < ema3[-2] and closes[-1] < ema10[-1]
 
-    # 2. ШВИДКИЙ RSI (період 5) — Свіжий імпульс без перегріву
+    # 2. ШВИДКИЙ MACD (5, 13, 4) — Прискорення імпульсу
+    ema5 = ema(closes, 5)
+    ema13 = ema(closes, 13)
+    macd_line = [a - b for a, b in zip(ema5[-6:], ema13[-6:])]
+    signal_line = ema(macd_line, 4)
+    hist_now = macd_line[-1] - signal_line[-1]
+    hist_prev = macd_line[-2] - signal_line[-2]
+
+    macd_bull = hist_now > 0 and hist_now >= hist_prev
+    macd_bear = hist_now < 0 and hist_now <= hist_prev
+
+    # 3. MOMENTUM (період 4) — Швидкість руху ціни
+    mom_now = closes[-1] - closes[-5]
+    mom_prev = closes[-2] - closes[-6]
+
+    mom_bull = mom_now > 0 and mom_now >= mom_prev
+    mom_bear = mom_now < 0 and mom_now <= mom_prev
+
+    # 4. KELTNER CHANNEL (EMA 10, ATR 10, множник 1.5) — Захист від входу на піку за межами каналу
+    tr_list = [
+        max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        for i in range(-10, 0)
+    ]
+    atr10 = statistics.mean(tr_list)
+    kc_upper = ema10[-1] + (1.5 * atr10)
+    kc_lower = ema10[-1] - (1.5 * atr10)
+
+    in_bull_keltner = (atr10 > 0) and (ema10[-1] < closes[-1] < kc_upper)
+    in_bear_keltner = (atr10 > 0) and (kc_lower < closes[-1] < ema10[-1])
+
+    # 5. ШВИДКИЙ RSI (період 5)
     rsi = calculate_rsi(closes, period=5)
     if rsi is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
 
-    # 3. STOCHASTIC OSCILLATOR (5, 3, 3)
+    # 6. STOCHASTIC OSCILLATOR (5, 3, 3)
     k_values = []
     for i in range(4, len(closes)):
         low_min = min(lows[i - 4:i + 1])
@@ -101,12 +135,11 @@ def analyze_market(candles, recent_ticks):
     stoch_k = statistics.mean(k_values[-2:])
     stoch_d = statistics.mean(k_values[-3:])
 
-    # 4. АНТИ-ВИСНАЖЕННЯ (Не заходимо, якщо вже було 3 свічки одного кольору поспіль)
-    prev_bulls = sum(1 for i in range(-4, -1) if closes[i] > opens[i])
-    prev_bears = sum(1 for i in range(-4, -1) if closes[i] < opens[i])
+    # 7. АНТИ-ВИСНАЖЕННЯ (Не більше 2 свічок одного кольору перед поточною)
+    prev_bulls = sum(1 for i in range(-3, -1) if closes[i] > opens[i])
+    prev_bears = sum(1 for i in range(-3, -1) if closes[i] < opens[i])
 
-    # 5. ЗАХИСТ ВІД ЗАПІЗНІЛОГО ВХОДУ:
-    # Ловимо свічку на СТАРТІ (тіло 15%..55% діапазону), а якщо свічка вже роздулася > 55% — НЕ ВХОДИМО!
+    # 8. СТАРТ СВІЧКИ (Тіло 15%..55% діапазону — ловимо початок руху, а не його фініш!)
     curr_range = highs[-1] - lows[-1]
     if curr_range <= 0:
         return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
@@ -119,115 +152,58 @@ def analyze_market(candles, recent_ticks):
     early_bull_candle = closes[-1] > opens[-1] and (0.15 <= body_ratio <= 0.55) and (upper_wick / curr_range) <= 0.25
     early_bear_candle = closes[-1] < opens[-1] and (0.15 <= body_ratio <= 0.55) and (lower_wick / curr_range) <= 0.25
 
-    # 6. ЖИВИЙ ТІК У НАПРЯМКУ РУХУ
+    # 9. ЖИВИЙ ТІК У НАПРЯМКУ РУХУ
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
+    # УСІ 9 ІНДИКАТОРІВ ТА ФІЛЬТРІВ
     call_checks = [
         bull_ema,
-        50 <= rsi <= 70,
-        stoch_k > stoch_d and 20 <= stoch_k <= 75,
-        prev_bulls < 3,
+        macd_bull,
+        mom_bull,
+        in_bull_keltner,
+        50 <= rsi <= 72,
+        stoch_k > stoch_d and 20 <= stoch_k <= 76,
+        prev_bulls < 2,
         early_bull_candle,
         tick_up
     ]
 
     put_checks = [
         bear_ema,
-        30 <= rsi <= 50,
-        stoch_k < stoch_d and 25 <= stoch_k <= 80,
-        prev_bears < 3,
+        macd_bear,
+        mom_bear,
+        in_bear_keltner,
+        28 <= rsi <= 50,
+        stoch_k < stoch_d and 24 <= stoch_k <= 80,
+        prev_bears < 2,
         early_bear_candle,
         tick_down
     ]
 
-    if all(call_checks):
+    call_score = sum(call_checks)
+    put_score = sum(put_checks)
+
+    # Оптимальний поріг: 7 із 9 критеріїв + обов'язковий тренд EMA, коридор Кельтнера та живий тік!
+    if call_score >= 7 and call_score > put_score and bull_ema and in_bull_keltner and tick_up and prev_bulls < 2:
         return {
             "status": "SIGNAL",
             "direction": "CALL",
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": "6/6 (Старт руху)",
+            "score": f"{call_score}/9 (Keltner+MACD+MOM)",
             "sec": sec_in_minute
         }
 
-    if all(put_checks):
+    if put_score >= 7 and put_score > call_score and bear_ema and in_bear_keltner and tick_down and prev_bears < 2:
         return {
             "status": "SIGNAL",
             "direction": "PUT",
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": "6/6 (Старт руху)",
+            "score": f"{put_score}/9 (Keltner+MACD+MOM)",
             "sec": sec_in_minute
         }
-
-    return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
-
-
-    body = abs(closes[-1] - opens[-1])
-    body_ratio = body / curr_range
-    upper_wick = highs[-1] - max(opens[-1], closes[-1])
-    lower_wick = min(opens[-1], closes[-1]) - lows[-1]
-
-    no_upper_wick = (upper_wick / curr_range) <= 0.25
-    no_lower_wick = (lower_wick / curr_range) <= 0.25
-
-    # 7 & 8. ВИПЕРЕДЖУВАЛЬНИЙ ТРИГЕР НА 1-МУ КРОЦІ ІМПУЛЬСУ (БЕЗ ЗАПІЗНЕННЯ!)
-    instant_bull_tick = False
-    instant_bear_tick = False
-    not_exhausted_bull = True
-    not_exhausted_bear = True
-
-    if len(recent_ticks) >= 2:
-        # Сигнал спалахує миттєво на ПЕРШОМУ ж кроці ціни у бік тренду!
-        instant_bull_tick = recent_ticks[-1] > recent_ticks[-2]
-        instant_bear_tick = recent_ticks[-1] < recent_ticks[-2]
-
-    if len(recent_ticks) >= 5:
-        t5 = recent_ticks[-5:]
-        # Якщо вже було 4 тіки поспіль без зупинки — імпульс запізнілий, блокуємо!
-        not_exhausted_bull = not (t5 > t5 > t5 > t5 > t5)
-        not_exhausted_bear = not (t5 < t5 < t5 < t5 < t5)
-
-    # ЗБІР УСІХ 8 ФІЛЬТРІВ ДЛЯ МИТТЄВОГО 3-СЕКУНДНОГО ВХОДУ
-    call_checks = [
-        bull_ema,
-        52 <= rsi <= 74,
-        stoch_k > stoch_d and 25 <= stoch_k <= 76,
-        cci >= 40,
-        prev_bulls < 3,
-        closes[-1] > opens[-1] and body_ratio >= 0.30 and no_upper_wick,
-        instant_bull_tick,
-        not_exhausted_bull
-    ]
-
-    put_checks = [
-        bear_ema,
-        26 <= rsi <= 48,
-        stoch_k < stoch_d and 24 <= stoch_k <= 75,
-        cci <= -40,
-        prev_bears < 3,
-        closes[-1] < opens[-1] and body_ratio >= 0.30 and no_lower_wick,
-        instant_bear_tick,
-        not_exhausted_bear
-    ]
-
-    call_score = sum(call_checks)
-    put_score = sum(put_checks)
-
-    # Вхід дозволяється ТІЛЬКИ на свіжому 1-му тіку (not_exhausted) + мінімум 6 із 8 індикаторів!
-    call_score = sum(call_checks)
-    put_score = sum(put_checks)
-
-    if call_score == 7:
-        return {"status": "SIGNAL", "direction": "CALL", "price": closes[-1], "rsi": round(rsi, 1), "score": "7/7", "sec": sec_in_minute}
-    if put_score == 7:
-        return {"status": "SIGNAL", "direction": "PUT", "price": closes[-1], "rsi": round(rsi, 1), "score": "7/7", "sec": sec_in_minute}
-
-    if call_score == 6 and call_checks[0] and call_checks[6]:
-        return {"status": "PREPARE", "direction": "CALL", "price": closes[-1], "rsi": round(rsi, 1), "score": "6/7", "sec": sec_in_minute}
-    if put_score == 6 and put_checks[0] and put_checks[6]:
-        return {"status": "PREPARE", "direction": "PUT", "price": closes[-1], "rsi": round(rsi, 1), "score": "6/7", "sec": sec_in_minute}
 
     return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
 
