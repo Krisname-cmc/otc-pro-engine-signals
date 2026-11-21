@@ -1,2 +1,2 @@
-aiohttp==3.10.10
-git+https://github.com/ChipaDevTeam/PocketOptionAPI.git
+aiohttp>=3.9,<4
+git+https://github.com/chema-creator/PocketOptionApi.git
