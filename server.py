@@ -6,7 +6,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from aiohttp import web
-from pocketoptionapi.stable_api import PocketOption
+from pocketoptionapi import PocketOption
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -190,12 +191,19 @@ def analyze_market(candles, recent_ticks):
 
 def parse_assets(raw_assets):
     result = {}
-    if isinstance(raw_assets, dict):
-        items = raw_assets.values()
-    elif isinstance(raw_assets, list):
-        items = raw_assets
-    else:
+    if not isinstance(raw_assets, dict):
         return result
+    for sym, item in raw_assets.items():
+        if isinstance(item, dict) and str(sym).lower() in OTC_ASSET_LOOKUP:
+            payout = item.get("payout")
+            is_avail = item.get("is_available", True)
+            try:
+                p_val = float(payout) if payout is not None else 0
+            except Exception:
+                p_val = 0
+            result[str(sym)] = {"payout": p_val, "is_open": bool(is_avail)}
+    return result
+
 
     for item in items:
         if isinstance(item, dict):
@@ -230,13 +238,19 @@ async def market_worker():
                 continue
             try:
                 new_api = PocketOption(PO_SSID, demo=True)
-                ok = await asyncio.to_thread(new_api.connect)
+            try:
+                new_api = PocketOption(PO_SSID)
+                ok, err = await asyncio.to_thread(new_api.connect)
                 if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     logging.info("CONNECTED TO POCKET OPTION")
+                else:
+                    logging.error("PO AUTH ERROR: %s", err)
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
+
+
             await asyncio.sleep(3)
             continue
 
