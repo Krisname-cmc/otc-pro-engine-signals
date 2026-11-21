@@ -281,7 +281,7 @@ async def market_worker():
                 if not hist or hist[-1]["time"] < bucket:
                     hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
                     if len(hist) > 25:
-                     STATE["candles"][sym] = hist[-25:]
+                        STATE["candles"][sym] = hist[-25:]
                 else:
                     cur = hist[-1]
                     cur["high"] = max(cur["high"], price)
