@@ -124,63 +124,67 @@ def analyze_market(candles, recent_ticks):
     no_upper_wick = (upper_wick / curr_range) <= 0.25
     no_lower_wick = (lower_wick / curr_range) <= 0.25
 
-    # 7 & 8. МІКРО-ІМПУЛЬС ТА ПРИСКОРЕННЯ ЖИВИХ ТІКІВ (3 тіки для миттєвого 3-секундного входу!)
-    tick_bull_streak = False
-    tick_bear_streak = False
-    tick_accel_bull = False
-    tick_accel_bear = False
+    # 7 & 8. ВИПЕРЕДЖУВАЛЬНИЙ ТРИГЕР НА 1-МУ КРОЦІ ІМПУЛЬСУ (БЕЗ ЗАПІЗНЕННЯ!)
+    instant_bull_tick = False
+    instant_bear_tick = False
+    not_exhausted_bull = True
+    not_exhausted_bear = True
 
-    if len(recent_ticks) >= 3:
-        t = recent_ticks[-3:]
-        tick_bull_streak = t[2] > t[1] > t[0]
-        tick_bear_streak = t[2] < t[1] < t[0]
-        tick_accel_bull = (t[2] - t[1]) >= (t[1] - t[0]) > 0
-        tick_accel_bear = (t[1] - t[2]) >= (t[0] - t[1]) > 0
+    if len(recent_ticks) >= 2:
+        # Сигнал спалахує миттєво на ПЕРШОМУ ж кроці ціни у бік тренду!
+        instant_bull_tick = recent_ticks[-1] > recent_ticks[-2]
+        instant_bear_tick = recent_ticks[-1] < recent_ticks[-2]
 
-    # ЗБІР УСІХ 8 ФІЛЬТРІВ ДЛЯ 3-СЕКУНДНОГО СНАЙПЕРСЬКОГО ВХОДУ
+    if len(recent_ticks) >= 5:
+        t5 = recent_ticks[-5:]
+        # Якщо вже було 4 тіки поспіль без зупинки — імпульс запізнілий, блокуємо!
+        not_exhausted_bull = not (t5 > t5 > t5 > t5 > t5)
+        not_exhausted_bear = not (t5 < t5 < t5 < t5 < t5)
+
+    # ЗБІР УСІХ 8 ФІЛЬТРІВ ДЛЯ МИТТЄВОГО 3-СЕКУНДНОГО ВХОДУ
     call_checks = [
         bull_ema,
-        52 <= rsi <= 75,
-        stoch_k > stoch_d and 25 <= stoch_k <= 78,
-        cci >= 45,
+        52 <= rsi <= 74,
+        stoch_k > stoch_d and 25 <= stoch_k <= 76,
+        cci >= 40,
         prev_bulls < 3,
-        closes[-1] > opens[-1] and body_ratio >= 0.35 and no_upper_wick,
-        tick_bull_streak,
-        tick_accel_bull
+        closes[-1] > opens[-1] and body_ratio >= 0.30 and no_upper_wick,
+        instant_bull_tick,
+        not_exhausted_bull
     ]
 
     put_checks = [
         bear_ema,
-        25 <= rsi <= 48,
-        stoch_k < stoch_d and 22 <= stoch_k <= 75,
-        cci <= -45,
+        26 <= rsi <= 48,
+        stoch_k < stoch_d and 24 <= stoch_k <= 75,
+        cci <= -40,
         prev_bears < 3,
-        closes[-1] < opens[-1] and body_ratio >= 0.35 and no_lower_wick,
-        tick_bear_streak,
-        tick_accel_bear
+        closes[-1] < opens[-1] and body_ratio >= 0.30 and no_lower_wick,
+        instant_bear_tick,
+        not_exhausted_bear
     ]
 
     call_score = sum(call_checks)
     put_score = sum(put_checks)
 
-    # Обов'язково має бути живий імпульс тіків (tick_streak) + мінімум 6 із 8 індикаторів!
-    if call_score >= 6 and call_score > put_score and tick_bull_streak and prev_bulls < 3:
+    # Вхід дозволяється ТІЛЬКИ на свіжому 1-му тіку (not_exhausted) + мінімум 6 із 8 індикаторів!
+    if call_score >= 6 and call_score > put_score and instant_bull_tick and not_exhausted_bull and prev_bulls < 3:
         return {
             "status": "SIGNAL",
             "direction": "CALL",
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": f"{call_score}/8 (Тік-імпульс)",
+            "score": f"{call_score}/8 (Старт імпульсу)",
             "sec": sec_in_minute
         }
 
-    if put_score >= 6 and put_score > call_score and tick_bear_streak and prev_bears < 3:
+    if put_score >= 6 and put_score > call_score and instant_bear_tick and not_exhausted_bear and prev_bears < 3:
         return {
             "status": "SIGNAL",
             "direction": "PUT",
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": f"{put_score}/8 (Тік-імпульс)",
+            "score": f"{put_score}/8 (Старт імпульсу)",
             "sec": sec_in_minute
         }
 
