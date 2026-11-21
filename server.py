@@ -124,20 +124,18 @@ def analyze_market(candles, recent_ticks):
     no_upper_wick = (upper_wick / curr_range) <= 0.25
     no_lower_wick = (lower_wick / curr_range) <= 0.25
 
-    # 7 & 8. МІКРО-ІМПУЛЬС ТА ПРИСКОРЕННЯ ЖИВИХ ТІКІВ (Для точного 3-секундного входу!)
+    # 7 & 8. МІКРО-ІМПУЛЬС ТА ПРИСКОРЕННЯ ЖИВИХ ТІКІВ (3 тіки для миттєвого 3-секундного входу!)
     tick_bull_streak = False
     tick_bear_streak = False
     tick_accel_bull = False
     tick_accel_bear = False
 
-    if len(recent_ticks) >= 4:
-        t = recent_ticks[-4:]
-        # 3 останні рухи тіків строго в один бік без відкату
-        tick_bull_streak = t[3] > t[2] > t[1] > t[0]
-        tick_bear_streak = t[3] < t[2] < t[1] < t[0]
-        # Прискорення: останній крок ціни >= попередньому кроку
-        tick_accel_bull = (t[3] - t[2]) >= (t[2] - t[1]) > 0
-        tick_accel_bear = (t[2] - t[3]) >= (t[1] - t[2]) > 0
+    if len(recent_ticks) >= 3:
+        t = recent_ticks[-3:]
+        tick_bull_streak = t[2] > t[1] > t[0]
+        tick_bear_streak = t[2] < t[1] < t[0]
+        tick_accel_bull = (t[2] - t[1]) >= (t[1] - t[0]) > 0
+        tick_accel_bear = (t[1] - t[2]) >= (t[0] - t[1]) > 0
 
     # ЗБІР УСІХ 8 ФІЛЬТРІВ ДЛЯ 3-СЕКУНДНОГО СНАЙПЕРСЬКОГО ВХОДУ
     call_checks = [
@@ -340,8 +338,43 @@ async def handle_status(request):
     })
 
 
+async def priority_tick_worker():
+    """Окремий надшвидкий потік (0.15с) виключно для поточної обраної пари"""
+    while True:
+        api = STATE["api"]
+        prio = STATE["priority_symbol"]
+        if api is not None and STATE["connected"] and prio:
+            try:
+                ticks = await asyncio.to_thread(api.get_realtime_ticks, prio, 5)
+                if ticks:
+                    ts, price = ticks[-1]
+                    price = float(price)
+
+                    t_hist = STATE["ticks"].setdefault(prio, [])
+                    if not t_hist or t_hist[-1] != price:
+                        t_hist.append(price)
+                        if len(t_hist) > 15:
+                            STATE["ticks"][prio] = t_hist[-15:]
+
+                    bucket = int(ts // 60) * 60
+                    hist = STATE["candles"].setdefault(prio, [])
+                    if not hist or hist[-1]["time"] < bucket:
+                        hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
+                        if len(hist) > 25:
+                            STATE["candles"][prio] = hist[-25:]
+                    else:
+                        cur = hist[-1]
+                        cur["high"] = max(cur["high"], price)
+                        cur["low"] = min(cur["low"], price)
+                        cur["close"] = price
+            except Exception:
+                pass
+        await asyncio.sleep(0.15)
+
+
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
+    app["prio_worker"] = asyncio.create_task(priority_tick_worker())
 
 
 async def main():
