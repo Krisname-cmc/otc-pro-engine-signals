@@ -255,6 +255,11 @@ async def market_worker():
                 await asyncio.sleep(5)
                 continue
             try:
+                if api is not None:
+                    try:
+                        await asyncio.to_thread(api.disconnect_websocket)
+                    except Exception:
+                        pass
                 new_api = PocketOption(PO_SSID)
                 ok, err = await asyncio.to_thread(new_api.connect)
                 if ok:
@@ -266,9 +271,8 @@ async def market_worker():
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(15)
             continue
-
 
         try:
             raw = await asyncio.to_thread(api.get_assets)
