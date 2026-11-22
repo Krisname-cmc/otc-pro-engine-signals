@@ -187,28 +187,46 @@ def analyze_market(candles, recent_ticks):
     call_score = sum(call_checks)
     put_score = sum(put_checks)
 
-    # Оптимальний поріг: 7 із 9 критеріїв + обов'язковий тренд EMA, коридор Кельтнера та живий тік!
-    if call_score >= 7 and call_score > put_score and bull_ema and in_bull_keltner and tick_up and prev_bulls < 2:
+    # Автоматичний підбір найкращої експірації (30с, 1m, 2m, 3m) під силу імпульсу та секунду свічки
+    def pick_expiration(score, sec):
+        if score >= 9:
+            return "30с" if sec >= 35 else "1m"
+        return "2m" if sec <= 25 else "3m"
+
+    if call_score >= 8 and call_score > put_score and sar_buy and bull_ema and in_bull_keltner:
+        rec_exp = pick_expiration(call_score, sec_in_minute)
         return {
             "status": "SIGNAL",
             "direction": "CALL",
+            "rec_exp": rec_exp,
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": f"{call_score}/9 (Keltner+MACD+MOM)",
+            "sar": "BUY",
+            "score": f"{call_score}/10 (SAR+Keltner)",
             "sec": sec_in_minute
         }
 
-    if put_score >= 7 and put_score > call_score and bear_ema and in_bear_keltner and tick_down and prev_bears < 2:
+    if put_score >= 8 and put_score > call_score and sar_sell and bear_ema and in_bear_keltner:
+        rec_exp = pick_expiration(put_score, sec_in_minute)
         return {
             "status": "SIGNAL",
             "direction": "PUT",
+            "rec_exp": rec_exp,
             "price": closes[-1],
             "rsi": round(rsi, 1),
-            "score": f"{put_score}/9 (Keltner+MACD+MOM)",
+            "sar": "SELL",
+            "score": f"{put_score}/10 (SAR+Keltner)",
             "sec": sec_in_minute
         }
 
-    return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
+    return {
+        "status": "FLAT",
+        "price": closes[-1],
+        "rsi": round(rsi, 1),
+        "sar": "BUY" if sar_buy else "SELL",
+        "sec": sec_in_minute
+    }
+
 
 def parse_assets(raw_assets):
     result = {}
@@ -223,27 +241,6 @@ def parse_assets(raw_assets):
             except Exception:
                 p_val = 0
             result[str(sym)] = {"payout": p_val, "is_open": bool(is_avail)}
-    return result
-
-
-    for item in items:
-        if isinstance(item, dict):
-            sym = item.get("symbol") or item.get("name") or item.get("asset")
-            payout = item.get("payout") or item.get("profit")
-            is_open = item.get("is_open", item.get("open", True))
-        elif isinstance(item, (list, tuple)) and len(item) >= 3:
-            sym = item[1]
-            payout = item[5] if len(item) > 5 else None
-            is_open = bool(item[14]) if len(item) > 14 else True
-        else:
-            continue
-
-        if sym and str(sym).lower() in OTC_ASSET_LOOKUP:
-            try:
-                p_val = float(payout) if payout is not None else 0
-            except Exception:
-                p_val = 0
-            result[str(sym)] = {"payout": p_val, "is_open": bool(is_open)}
     return result
 
 
