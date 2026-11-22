@@ -288,6 +288,24 @@ async def market_worker():
 
         for sym in symbols:
             try:
+                # 1. Якщо свічок ще менше 14 — миттєво завантажуємо готову історію з сервера!
+                if len(STATE["candles"].get(sym, [])) < 14:
+                    candles_raw = await asyncio.to_thread(api.get_candles, sym, 60)
+                    if candles_raw and len(candles_raw) >= 14:
+                        formatted = []
+                        for c in candles_raw[-20:]:
+                            if isinstance(c, dict):
+                                formatted.append({
+                                    "time": int(c.get("time", 0)),
+                                    "open": float(c.get("open", 0)),
+                                    "high": float(c.get("high", 0)),
+                                    "low": float(c.get("low", 0)),
+                                    "close": float(c.get("close", 0))
+                                })
+                        if len(formatted) >= 14:
+                            STATE["candles"][sym] = formatted
+
+                # 2. Підписуємось на живі тіки
                 if sym not in subscribed:
                     if await asyncio.to_thread(api.subscribe, sym, 60):
                         subscribed.add(sym)
@@ -301,17 +319,14 @@ async def market_worker():
                 ts, price = ticks[-1]
                 price = float(price)
 
-                # Оновлюємо буфер живих тіків для миттєвого 3-секундного аналізу
                 t_hist = STATE["ticks"].setdefault(sym, [])
                 if not t_hist or t_hist[-1] != price:
                     t_hist.append(price)
                     if len(t_hist) > 15:
                         STATE["ticks"][sym] = t_hist[-15:]
 
-                # Оновлюємо хвилинні свічки M1
                 bucket = int(ts // 60) * 60
                 hist = STATE["candles"].setdefault(sym, [])
-
                 if not hist or hist[-1]["time"] < bucket:
                     hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
                     if len(hist) > 25:
@@ -321,10 +336,10 @@ async def market_worker():
                     cur["high"] = max(cur["high"], price)
                     cur["low"] = min(cur["low"], price)
                     cur["close"] = price
+
             except Exception:
                 pass
-
-        await asyncio.sleep(0.35)
+            await asyncio.sleep(0.15)
 
 
 @web.middleware
