@@ -248,7 +248,7 @@ async def market_worker():
     subscribed = set()
     while True:
         api = STATE["api"]
-        if api is None or not api.check_connect():
+        if api is None or not STATE["connected"]:
             STATE["connected"] = False
             subscribed.clear()
             if not PO_SSID:
