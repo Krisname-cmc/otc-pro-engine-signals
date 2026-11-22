@@ -21,10 +21,13 @@ OTC_ASSETS = [
     "USDCHF_otc", "EURJPY_otc", "GBPJPY_otc", "AUDCAD_otc", "EURGBP_otc",
     "NZDUSD_otc", "EURCHF_otc", "EURAUD_otc", "EURNZD_otc", "GBPAUD_otc",
     "GBPCAD_otc", "GBPCHF_otc", "AUDJPY_otc", "CADJPY_otc", "CHFJPY_otc",
-    # Додаткові крос-пари та високодохідні OTC активи (8)
+    # Додаткові кроси, екзотика, метали та крипто-OTC (20)
     "AUDNZD_otc", "CADCHF_otc", "NZDCAD_otc", "NZDCHF_otc", "NZDJPY_otc",
-    "USDBRL_otc", "XAUUSD_otc", "XAGUSD_otc"
+    "USDBRL_otc", "USDCLP_otc", "USDCNH_otc", "USDCOP_otc", "USDIDR_otc",
+    "USDINR_otc", "USDMXN_otc", "USDPHP_otc", "USDTHB_otc", "USDVND_otc",
+    "XAUUSD_otc", "XAGUSD_otc", "UKBrent_otc", "USCrude_otc", "BTCUSD_otc"
 ]
+
 OTC_ASSET_LOOKUP = {s.lower() for s in OTC_ASSETS}
 
 STATE = {
