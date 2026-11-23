@@ -543,12 +543,16 @@ async def market_worker():
 
 
 async def priority_tick_worker():
-    """Швидке оновлення (0.25с) поточної обраної пари"""
+    """Швидке оновлення (0.25с) поточної обраної пари з авто-відновленням підписки"""
     while True:
         api = STATE["api"]
         prio = STATE["priority_symbol"]
         if api is not None and STATE["connected"] and prio:
             try:
+                sub_set = STATE.setdefault("subscribed", set())
+                if prio not in sub_set:
+                    await asyncio.to_thread(api.subscribe, prio, 60)
+                    sub_set.add(prio)
                 await fetch_symbol_data(api, prio)
             except Exception:
                 pass
