@@ -387,13 +387,13 @@ async def market_worker():
                         pass
                 new_api = PocketOption(PO_SSID)
                 ok, err = await asyncio.to_thread(new_api.connect)
-                raw_check = await asyncio.to_thread(new_api.get_assets)
-                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
+                if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION")
+                    logging.info("CONNECTED TO POCKET OPTION (OK)")
                 else:
+                    STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
