@@ -424,42 +424,85 @@ async def handle_status(request):
     })
 
 
+async def fetch_symbol_data(api, sym):
+    """Надійне отримання свічок та живих тіків через перевірений метод get_candles"""
+    candles_raw = await asyncio.to_thread(api.get_candles, sym, 60)
+    if not candles_raw:
+        return
+
+    formatted = parse_history_candles(candles_raw)
+    if formatted:
+        STATE["candles"][sym] = formatted[-25:]
+        last_price = formatted[-1]["close"]
+        t_hist = STATE["ticks"].setdefault(sym, [])
+        if not t_hist or t_hist[-1] != last_price:
+            t_hist.append(last_price)
+            if len(t_hist) > 15:
+                STATE["ticks"][sym] = t_hist[-15:]
+
+
+async def market_worker():
+    while True:
+        api = STATE["api"]
+        if api is None or not STATE["connected"]:
+            STATE["connected"] = False
+            if not PO_SSID:
+                await asyncio.sleep(5)
+                continue
+            try:
+                if api is not None:
+                    try:
+                        await asyncio.to_thread(api.disconnect_websocket)
+                    except Exception:
+                        pass
+                new_api = PocketOption(PO_SSID)
+                ok, err = await asyncio.to_thread(new_api.connect)
+                raw_check = await asyncio.to_thread(new_api.get_assets)
+                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
+                    STATE["api"] = new_api
+                    STATE["connected"] = True
+                    logging.info("CONNECTED TO POCKET OPTION")
+                else:
+                    logging.error("PO AUTH ERROR: %s", err)
+            except Exception as e:
+                logging.error("CONNECT ERROR: %s", e)
+
+            await asyncio.sleep(10)
+            continue
+
+        try:
+            raw = await asyncio.to_thread(api.get_assets)
+            parsed = parse_assets(raw)
+            if parsed:
+                STATE["assets"] = parsed
+        except Exception:
+            pass
+
+        prio = STATE["priority_symbol"]
+        open_syms = [s for s, info in STATE["assets"].items() if info.get("is_open")]
+        if prio and prio not in open_syms:
+            open_syms.insert(0, prio)
+        symbols = ([prio] if prio in open_syms else []) + [s for s in open_syms if s != prio]
+
+        for sym in symbols:
+            try:
+                await fetch_symbol_data(api, sym)
+            except Exception as e:
+                logging.error("CANDLES ERROR (%s): %s", sym, e)
+            await asyncio.sleep(0.25)
+
+
 async def priority_tick_worker():
-    subscribed_prio = set()
+    """Швидке оновлення (0.25с) поточної обраної пари"""
     while True:
         api = STATE["api"]
         prio = STATE["priority_symbol"]
         if api is not None and STATE["connected"] and prio:
             try:
-                if prio not in subscribed_prio:
-                    await asyncio.to_thread(api.subscribe, prio, 60)
-                    subscribed_prio.add(prio)
-
-                ticks = await asyncio.to_thread(api.get_realtime_ticks, prio, 5)
-                if ticks:
-                    ts, price = ticks[-1]
-                    price = float(price)
-
-                    t_hist = STATE["ticks"].setdefault(prio, [])
-                    if not t_hist or t_hist[-1] != price:
-                        t_hist.append(price)
-                        if len(t_hist) > 15:
-                            STATE["ticks"][prio] = t_hist[-15:]
-
-                    bucket = int(ts // 60) * 60
-                    hist = STATE["candles"].setdefault(prio, [])
-                    if not hist or hist[-1]["time"] < bucket:
-                        hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
-                        if len(hist) > 25:
-                            STATE["candles"][prio] = hist[-25:]
-                    else:
-                        cur = hist[-1]
-                        cur["high"] = max(cur["high"], price)
-                        cur["low"] = min(cur["low"], price)
-                        cur["close"] = price
+                await fetch_symbol_data(api, prio)
             except Exception:
                 pass
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.25)
 
 
 async def on_startup(app):
