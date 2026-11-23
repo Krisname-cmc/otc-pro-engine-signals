@@ -425,20 +425,70 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Надійне отримання свічок та живих тіків через перевірений метод get_candles"""
-    candles_raw = await asyncio.to_thread(api.get_candles, sym, 60)
-    if not candles_raw:
-        return
+    """Автоматично підбирає робочий метод котирувань у встановленій бібліотеці PocketOption"""
+    if not STATE.get("methods_logged"):
+        STATE["methods_logged"] = True
+        methods = [m for m in dir(api) if not m.startswith("_")]
+        logging.info("AVAILABLE PO METHODS: %s", methods)
 
-    formatted = parse_history_candles(candles_raw)
-    if formatted:
-        STATE["candles"][sym] = formatted[-25:]
-        last_price = formatted[-1]["close"]
+    # 1. Пробуємо отримати свічки, якщо є відповідний метод
+    for cand_fn in ("get_candles", "get_candles_v2", "candles", "fetch_candles"):
+        if hasattr(api, cand_fn):
+            raw_c = await asyncio.to_thread(getattr(api, cand_fn), sym, 60)
+            formatted = parse_history_candles(raw_c)
+            if formatted:
+                STATE["candles"][sym] = formatted[-25:]
+                return
+
+    # 2. Підписуємось на живий потік котирувань
+    sub_set = STATE.setdefault("subscribed", set())
+    if sym not in sub_set:
+        for sub_fn in ("subscribe_symbol", "subscribe", "change_symbol", "start_candles_stream"):
+            if hasattr(api, sub_fn):
+                try:
+                    if sub_fn == "subscribe":
+                        await asyncio.to_thread(getattr(api, sub_fn), sym, 60)
+                    else:
+                        await asyncio.to_thread(getattr(api, sub_fn), sym)
+                    sub_set.add(sym)
+                    break
+                except Exception:
+                    pass
+
+    # 3. Зчитуємо останній тік або ціну зі словника бібліотеки
+    price = None
+    ts = time.time()
+
+    if hasattr(api, "get_realtime_ticks"):
+        ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
+        if ticks:
+            ts, price = ticks[-1]
+    elif hasattr(api, "get_realtime_candles"):
+        rc = await asyncio.to_thread(api.get_realtime_candles, sym, 60)
+        if isinstance(rc, dict) and rc:
+            last_item = list(rc.values())[-1]
+            if isinstance(last_item, dict):
+                price = last_item.get("close") or last_item.get("price")
+
+    if price is not None:
+        price = float(price)
         t_hist = STATE["ticks"].setdefault(sym, [])
-        if not t_hist or t_hist[-1] != last_price:
-            t_hist.append(last_price)
+        if not t_hist or t_hist[-1] != price:
+            t_hist.append(price)
             if len(t_hist) > 15:
                 STATE["ticks"][sym] = t_hist[-15:]
+
+        bucket = int(ts // 60) * 60
+        hist = STATE["candles"].setdefault(sym, [])
+        if not hist or hist[-1]["time"] < bucket:
+            hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
+            if len(hist) > 25:
+                STATE["candles"][sym] = hist[-25:]
+        else:
+            cur = hist[-1]
+            cur["high"] = max(cur["high"], price)
+            cur["low"] = min(cur["low"], price)
+            cur["close"] = price
 
 
 async def market_worker():
