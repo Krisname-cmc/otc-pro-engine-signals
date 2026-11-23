@@ -218,8 +218,8 @@ def analyze_market(candles, recent_ticks):
     call_score = sum(call_checks)
     put_score = sum(put_checks)
 
-    # Суворий відбір (мінімум 9/10) та стабільна експірація 1m
-    if call_score >= 9 and call_score > put_score and sar_buy and bull_ema and in_bull_keltner:
+    # Оптимальний поріг: 8 із 10 критеріїв + Parabolic SAR + тренд EMA (стабільна експірація 1m)
+    if call_score >= 8 and call_score > put_score and sar_buy and bull_ema:
         return {
             "status": "SIGNAL",
             "direction": "CALL",
@@ -231,7 +231,7 @@ def analyze_market(candles, recent_ticks):
             "sec": sec_in_minute
         }
 
-    if put_score >= 9 and put_score > call_score and sar_sell and bear_ema and in_bear_keltner:
+    if put_score >= 8 and put_score > call_score and sar_sell and bear_ema:
         return {
             "status": "SIGNAL",
             "direction": "PUT",
@@ -250,7 +250,6 @@ def analyze_market(candles, recent_ticks):
         "sar": "BUY" if sar_buy else "SELL",
         "sec": sec_in_minute
     }
-
 
 def parse_assets(raw_assets):
     result = {}
@@ -272,7 +271,7 @@ def parse_history_candles(candles_raw):
     formatted = []
     if not candles_raw:
         return formatted
-    for c in candles_raw[-20:]:
+    for c in candles_raw[-25:]:
         try:
             if isinstance(c, dict):
                 t = int(c.get("time") or c.get("timestamp") or 0)
