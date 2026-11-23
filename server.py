@@ -300,7 +300,6 @@ def parse_history_candles(candles_raw):
             continue
     return formatted
 
-
 async def market_worker():
     subscribed = set()
     while True:
