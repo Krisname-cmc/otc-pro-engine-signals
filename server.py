@@ -329,12 +329,14 @@ async def handle_status(request):
         "pairs": sorted_pairs
     })
 
-
 async def fetch_symbol_data(api, sym):
-    """Отримання історичних свічок (get_historical_candles) та живих тіків"""
-    if len(STATE["candles"].get(sym, [])) < 14 and hasattr(api, "get_historical_candles"):
+    """Отримання історичних свічок та живих тіків без скидання при перемиканні"""
+    existing = STATE["candles"].get(sym, [])
+
+    # Завантажуємо історію лише один раз, якщо свічок ще менше 14
+    if len(existing) < 14 and hasattr(api, "get_historical_candles"):
         try:
-            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 25)
+            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 30)
             formatted = parse_history_candles(raw_c)
             if len(formatted) >= 14:
                 STATE["candles"][sym] = formatted[-25:]
@@ -345,7 +347,6 @@ async def fetch_symbol_data(api, sym):
     if sym not in sub_set:
         await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
-        await asyncio.sleep(0.05)
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
