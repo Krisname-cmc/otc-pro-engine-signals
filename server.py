@@ -425,53 +425,30 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Автоматично підбирає робочий метод котирувань у встановленій бібліотеці PocketOption"""
-    if not STATE.get("methods_logged"):
-        STATE["methods_logged"] = True
-        methods = [m for m in dir(api) if not m.startswith("_")]
-        logging.info("AVAILABLE PO METHODS: %s", methods)
-
-    # 1. Пробуємо отримати свічки, якщо є відповідний метод
-    for cand_fn in ("get_candles", "get_candles_v2", "candles", "fetch_candles"):
-        if hasattr(api, cand_fn):
-            raw_c = await asyncio.to_thread(getattr(api, cand_fn), sym, 60)
+    """Отримання історичних свічок (get_historical_candles) та живих тіків"""
+    # 1. Якщо свічок менше 14 — миттєво завантажуємо готову історію через get_historical_candles
+    if len(STATE["candles"].get(sym, [])) < 14 and hasattr(api, "get_historical_candles"):
+        try:
+            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 25)
             formatted = parse_history_candles(raw_c)
-            if formatted:
+            if len(formatted) >= 14:
                 STATE["candles"][sym] = formatted[-25:]
-                return
+        except Exception:
+            pass
 
-    # 2. Підписуємось на живий потік котирувань
+    # 2. Підписка на потік свічок
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
-        for sub_fn in ("subscribe_symbol", "subscribe", "change_symbol", "start_candles_stream"):
-            if hasattr(api, sub_fn):
-                try:
-                    if sub_fn == "subscribe":
-                        await asyncio.to_thread(getattr(api, sub_fn), sym, 60)
-                    else:
-                        await asyncio.to_thread(getattr(api, sub_fn), sym)
-                    sub_set.add(sym)
-                    break
-                except Exception:
-                    pass
+        await asyncio.to_thread(api.subscribe, sym, 60)
+        sub_set.add(sym)
+        await asyncio.sleep(0.05)
 
-    # 3. Зчитуємо останній тік або ціну зі словника бібліотеки
-    price = None
-    ts = time.time()
-
-    if hasattr(api, "get_realtime_ticks"):
-        ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
-        if ticks:
-            ts, price = ticks[-1]
-    elif hasattr(api, "get_realtime_candles"):
-        rc = await asyncio.to_thread(api.get_realtime_candles, sym, 60)
-        if isinstance(rc, dict) and rc:
-            last_item = list(rc.values())[-1]
-            if isinstance(last_item, dict):
-                price = last_item.get("close") or last_item.get("price")
-
-    if price is not None:
+    # 3. Зчитування живого тіка
+    ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
+    if ticks:
+        ts, price = ticks[-1]
         price = float(price)
+
         t_hist = STATE["ticks"].setdefault(sym, [])
         if not t_hist or t_hist[-1] != price:
             t_hist.append(price)
@@ -507,12 +484,13 @@ async def market_worker():
                         pass
                 new_api = PocketOption(PO_SSID)
                 ok, err = await asyncio.to_thread(new_api.connect)
-                raw_check = await asyncio.to_thread(new_api.get_assets)
-                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
+                if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
-                    logging.info("CONNECTED TO POCKET OPTION")
+                    STATE["subscribed"] = set()
+                    logging.info("CONNECTED TO POCKET OPTION (VERIFIED)")
                 else:
+                    STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
