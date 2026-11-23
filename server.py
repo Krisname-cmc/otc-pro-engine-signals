@@ -329,6 +329,7 @@ async def handle_status(request):
         "pairs": sorted_pairs
     })
 
+
 async def fetch_symbol_data(api, sym):
     """Отримання історичних свічок та живих тіків без скидання при перемиканні"""
     existing = STATE["candles"].get(sym, [])
