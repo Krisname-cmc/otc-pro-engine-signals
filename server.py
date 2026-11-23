@@ -218,17 +218,12 @@ def analyze_market(candles, recent_ticks):
     call_score = sum(call_checks)
     put_score = sum(put_checks)
 
-    def pick_expiration(score, sec):
-        if score >= 9:
-            return "30с" if sec >= 35 else "1m"
-        return "2m" if sec <= 25 else "3m"
-
-    if call_score >= 8 and call_score > put_score and sar_buy and bull_ema and in_bull_keltner:
-        rec_exp = pick_expiration(call_score, sec_in_minute)
+    # Суворий відбір (мінімум 9/10) та стабільна експірація 1m
+    if call_score >= 9 and call_score > put_score and sar_buy and bull_ema and in_bull_keltner:
         return {
             "status": "SIGNAL",
             "direction": "CALL",
-            "rec_exp": rec_exp,
+            "rec_exp": "1m",
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "BUY",
@@ -236,12 +231,11 @@ def analyze_market(candles, recent_ticks):
             "sec": sec_in_minute
         }
 
-    if put_score >= 8 and put_score > call_score and sar_sell and bear_ema and in_bear_keltner:
-        rec_exp = pick_expiration(put_score, sec_in_minute)
+    if put_score >= 9 and put_score > call_score and sar_sell and bear_ema and in_bear_keltner:
         return {
             "status": "SIGNAL",
             "direction": "PUT",
-            "rec_exp": rec_exp,
+            "rec_exp": "1m",
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "SELL",
@@ -300,93 +294,6 @@ def parse_history_candles(candles_raw):
             continue
     return formatted
 
-async def market_worker():
-    subscribed = set()
-    while True:
-        api = STATE["api"]
-        if api is None or not STATE["connected"]:
-            STATE["connected"] = False
-            subscribed.clear()
-            if not PO_SSID:
-                await asyncio.sleep(5)
-                continue
-            try:
-                if api is not None:
-                    try:
-                        await asyncio.to_thread(api.disconnect_websocket)
-                    except Exception:
-                        pass
-                new_api = PocketOption(PO_SSID)
-                ok, err = await asyncio.to_thread(new_api.connect)
-                raw_check = await asyncio.to_thread(new_api.get_assets)
-                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
-                    STATE["api"] = new_api
-                    STATE["connected"] = True
-                    logging.info("CONNECTED TO POCKET OPTION")
-                else:
-                    logging.error("PO AUTH ERROR: %s", err)
-            except Exception as e:
-                logging.error("CONNECT ERROR: %s", e)
-
-            await asyncio.sleep(10)
-            continue
-
-        try:
-            raw = await asyncio.to_thread(api.get_assets)
-            parsed = parse_assets(raw)
-            if parsed:
-                STATE["assets"] = parsed
-        except Exception:
-            pass
-
-        prio = STATE["priority_symbol"]
-        open_syms = [s for s, info in STATE["assets"].items() if info.get("is_open")]
-        if prio and prio not in open_syms:
-            open_syms.insert(0, prio)
-        symbols = ([prio] if prio in open_syms else []) + [s for s in open_syms if s != prio]
-
-        for sym in symbols:
-            try:
-                if sym not in subscribed:
-                    await asyncio.to_thread(api.subscribe, sym, 60)
-                    subscribed.add(sym)
-                    await asyncio.sleep(0.05)
-
-                if len(STATE["candles"].get(sym, [])) < 14:
-                    candles_raw = await asyncio.to_thread(api.get_candles, sym, 60)
-                    formatted = parse_history_candles(candles_raw)
-                    if len(formatted) >= 14:
-                        STATE["candles"][sym] = formatted
-
-                ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
-                if not ticks:
-                    continue
-
-                ts, price = ticks[-1]
-                price = float(price)
-
-                t_hist = STATE["ticks"].setdefault(sym, [])
-                if not t_hist or t_hist[-1] != price:
-                    t_hist.append(price)
-                    if len(t_hist) > 15:
-                        STATE["ticks"][sym] = t_hist[-15:]
-
-                bucket = int(ts // 60) * 60
-                hist = STATE["candles"].setdefault(sym, [])
-                if not hist or hist[-1]["time"] < bucket:
-                    hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
-                    if len(hist) > 25:
-                        STATE["candles"][sym] = hist[-25:]
-                else:
-                    cur = hist[-1]
-                    cur["high"] = max(cur["high"], price)
-                    cur["low"] = min(cur["low"], price)
-                    cur["close"] = price
-
-            except Exception:
-                pass
-            await asyncio.sleep(0.15)
-
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -425,7 +332,6 @@ async def handle_status(request):
 
 async def fetch_symbol_data(api, sym):
     """Отримання історичних свічок (get_historical_candles) та живих тіків"""
-    # 1. Якщо свічок менше 14 — миттєво завантажуємо готову історію через get_historical_candles
     if len(STATE["candles"].get(sym, [])) < 14 and hasattr(api, "get_historical_candles"):
         try:
             raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 25)
@@ -435,14 +341,12 @@ async def fetch_symbol_data(api, sym):
         except Exception:
             pass
 
-    # 2. Підписка на потік свічок
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
         await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
         await asyncio.sleep(0.05)
 
-    # 3. Зчитування живого тіка
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
         ts, price = ticks[-1]
@@ -517,6 +421,7 @@ async def market_worker():
             except Exception as e:
                 logging.error("CANDLES ERROR (%s): %s", sym, e)
             await asyncio.sleep(0.25)
+
 
 async def priority_tick_worker():
     """Швидке оновлення (0.25с) поточної обраної пари з авто-відновленням підписки"""
