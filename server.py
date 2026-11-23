@@ -484,13 +484,13 @@ async def market_worker():
                         pass
                 new_api = PocketOption(PO_SSID)
                 ok, err = await asyncio.to_thread(new_api.connect)
-                if ok:
+                raw_check = await asyncio.to_thread(new_api.get_assets)
+                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (VERIFIED)")
+                    logging.info("CONNECTED TO POCKET OPTION")
                 else:
-                    STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
@@ -518,7 +518,6 @@ async def market_worker():
             except Exception as e:
                 logging.error("CANDLES ERROR (%s): %s", sym, e)
             await asyncio.sleep(0.25)
-
 
 async def priority_tick_worker():
     """Швидке оновлення (0.25с) поточної обраної пари з авто-відновленням підписки"""
