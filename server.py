@@ -16,12 +16,10 @@ PORT = int(os.getenv("PORT", "8080"))
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 OTC_ASSETS = [
-    # Основні валютні мажори та кроси (20)
     "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD_otc",
     "USDCHF_otc", "EURJPY_otc", "GBPJPY_otc", "AUDCAD_otc", "EURGBP_otc",
     "NZDUSD_otc", "EURCHF_otc", "EURAUD_otc", "EURNZD_otc", "GBPAUD_otc",
     "GBPCAD_otc", "GBPCHF_otc", "AUDJPY_otc", "CADJPY_otc", "CHFJPY_otc",
-    # Додаткові кроси, екзотика, метали та крипто-OTC (20)
     "AUDNZD_otc", "CADCHF_otc", "NZDCAD_otc", "NZDCHF_otc", "NZDJPY_otc",
     "USDBRL_otc", "USDCLP_otc", "USDCNH_otc", "USDCOP_otc", "USDIDR_otc",
     "USDINR_otc", "USDMXN_otc", "USDPHP_otc", "USDTHB_otc", "USDVND_otc",
@@ -34,7 +32,7 @@ STATE = {
     "api": None,
     "assets": {},
     "candles": {},
-    "ticks": {},  # Зберігаємо останні 15 живих тіків для миттєвого аналізу на 3 сек
+    "ticks": {},
     "priority_symbol": "EURUSD_otc",
     "connected": False
 }
@@ -64,16 +62,54 @@ def calculate_rsi(closes, period=5):
     return 100 - (100 / (1 + rs))
 
 
+def calculate_psar(highs, lows, step=0.02, max_step=0.2):
+    length = len(highs)
+    if length < 5:
+        return None, None
+    psar = [lows[0]]
+    bull = True
+    af = step
+    ep = highs[0]
+
+    for i in range(1, length):
+        prev_psar = psar[-1]
+        if bull:
+            curr_psar = prev_psar + af * (ep - prev_psar)
+            curr_psar = min(curr_psar, lows[i - 1], lows[max(0, i - 2)])
+            if lows[i] < curr_psar:
+                bull = False
+                curr_psar = ep
+                ep = lows[i]
+                af = step
+            else:
+                if highs[i] > ep:
+                    ep = highs[i]
+                    af = min(af + step, max_step)
+        else:
+            curr_psar = prev_psar + af * (ep - prev_psar)
+            curr_psar = max(curr_psar, highs[i - 1], highs[max(0, i - 2)])
+            if highs[i] > curr_psar:
+                bull = True
+                curr_psar = ep
+                ep = highs[i]
+                af = step
+            else:
+                if lows[i] < ep:
+                    ep = lows[i]
+                    af = min(af + step, max_step)
+        psar.append(curr_psar)
+    return psar[-1], bull
+
+
 def analyze_market(candles, recent_ticks):
     if not candles or len(candles) < 14:
         return {"status": "WARMING", "collected": len(candles), "needed": 14}
 
     sec_in_minute = int(time.time()) % 60
-    # Входимо на старті та в активній фазі свічки (з 2-ї по 46-ту секунду)
-    if sec_in_minute < 2 or sec_in_minute > 46:
+    if sec_in_minute < 3 or sec_in_minute > 48:
         return {
             "status": "WAIT_CANDLE",
-            "wait_sec": (2 - sec_in_minute) if sec_in_minute < 2 else (60 - sec_in_minute),
+            "wait_sec": (3 - sec_in_minute) if sec_in_minute < 3 else (60 - sec_in_minute),
             "sec": sec_in_minute
         }
 
@@ -82,7 +118,15 @@ def analyze_market(candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. ТРЕНДОВІ EMA (3, 6, 10)
+    # 1. PARABOLIC SAR (0.02, 0.2)
+    psar_val, psar_bull = calculate_psar(highs, lows, step=0.02, max_step=0.2)
+    if psar_val is None:
+        return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
+
+    sar_buy = psar_bull and closes[-1] > psar_val
+    sar_sell = (not psar_bull) and closes[-1] < psar_val
+
+    # 2. ТРЕНДОВІ EMA (3, 6, 10)
     ema3 = ema(closes, 3)
     ema6 = ema(closes, 6)
     ema10 = ema(closes, 10)
@@ -90,7 +134,7 @@ def analyze_market(candles, recent_ticks):
     bull_ema = ema3[-1] > ema6[-1] and ema3[-1] > ema3[-2] and closes[-1] > ema10[-1]
     bear_ema = ema3[-1] < ema6[-1] and ema3[-1] < ema3[-2] and closes[-1] < ema10[-1]
 
-    # 2. ШВИДКИЙ MACD (5, 13, 4) — Прискорення імпульсу
+    # 3. ШВИДКИЙ MACD (5, 13, 4)
     ema5 = ema(closes, 5)
     ema13 = ema(closes, 13)
     macd_line = [a - b for a, b in zip(ema5[-6:], ema13[-6:])]
@@ -101,14 +145,14 @@ def analyze_market(candles, recent_ticks):
     macd_bull = hist_now > 0 and hist_now >= hist_prev
     macd_bear = hist_now < 0 and hist_now <= hist_prev
 
-    # 3. MOMENTUM (період 4) — Швидкість руху ціни
+    # 4. MOMENTUM (період 4)
     mom_now = closes[-1] - closes[-5]
     mom_prev = closes[-2] - closes[-6]
 
     mom_bull = mom_now > 0 and mom_now >= mom_prev
     mom_bear = mom_now < 0 and mom_now <= mom_prev
 
-    # 4. KELTNER CHANNEL (EMA 10, ATR 10, множник 1.5) — Захист від входу на піку за межами каналу
+    # 5. KELTNER CHANNEL (EMA 10, ATR 10, множник 1.5)
     tr_list = [
         max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         for i in range(-10, 0)
@@ -120,12 +164,12 @@ def analyze_market(candles, recent_ticks):
     in_bull_keltner = (atr10 > 0) and (ema10[-1] < closes[-1] < kc_upper)
     in_bear_keltner = (atr10 > 0) and (kc_lower < closes[-1] < ema10[-1])
 
-    # 5. ШВИДКИЙ RSI (період 5)
+    # 6. ШВИДКИЙ RSI (період 5)
     rsi = calculate_rsi(closes, period=5)
     if rsi is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
 
-    # 6. STOCHASTIC OSCILLATOR (5, 3, 3)
+    # 7. STOCHASTIC OSCILLATOR (5, 3, 3)
     k_values = []
     for i in range(4, len(closes)):
         low_min = min(lows[i - 4:i + 1])
@@ -138,56 +182,42 @@ def analyze_market(candles, recent_ticks):
     stoch_k = statistics.mean(k_values[-2:])
     stoch_d = statistics.mean(k_values[-3:])
 
-    # 7. АНТИ-ВИСНАЖЕННЯ (Не більше 2 свічок одного кольору перед поточною)
+    # 8. АНТИ-ВИСНАЖЕННЯ
     prev_bulls = sum(1 for i in range(-3, -1) if closes[i] > opens[i])
     prev_bears = sum(1 for i in range(-3, -1) if closes[i] < opens[i])
 
-    # 8. СТАРТ СВІЧКИ (Тіло 15%..55% діапазону — ловимо початок руху, а не його фініш!)
+    # 9. ФОРМА ПОТОЧНОЇ СВІЧКИ
     curr_range = highs[-1] - lows[-1]
     if curr_range <= 0:
-        return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sec": sec_in_minute}
+        return {"status": "FLAT", "price": closes[-1], "rsi": round(rsi, 1), "sar": "BUY" if sar_buy else "SELL", "sec": sec_in_minute}
 
     body = abs(closes[-1] - opens[-1])
     body_ratio = body / curr_range
     upper_wick = highs[-1] - max(opens[-1], closes[-1])
     lower_wick = min(opens[-1], closes[-1]) - lows[-1]
 
-    early_bull_candle = closes[-1] > opens[-1] and (0.15 <= body_ratio <= 0.55) and (upper_wick / curr_range) <= 0.25
-    early_bear_candle = closes[-1] < opens[-1] and (0.15 <= body_ratio <= 0.55) and (lower_wick / curr_range) <= 0.25
+    clean_bull = closes[-1] > opens[-1] and (0.20 <= body_ratio <= 0.65) and (upper_wick / curr_range) <= 0.25
+    clean_bear = closes[-1] < opens[-1] and (0.20 <= body_ratio <= 0.65) and (lower_wick / curr_range) <= 0.25
 
-    # 9. ЖИВИЙ ТІК У НАПРЯМКУ РУХУ
-    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
-    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
+    # 10. ПІДТВЕРДЖЕННЯ ЖИВОГО ТІКА
+    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] >= recent_ticks[-2]
+    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] <= recent_ticks[-2]
 
-    # УСІ 9 ІНДИКАТОРІВ ТА ФІЛЬТРІВ
     call_checks = [
-        bull_ema,
-        macd_bull,
-        mom_bull,
-        in_bull_keltner,
-        50 <= rsi <= 72,
-        stoch_k > stoch_d and 20 <= stoch_k <= 76,
-        prev_bulls < 2,
-        early_bull_candle,
-        tick_up
+        sar_buy, bull_ema, macd_bull, mom_bull, in_bull_keltner,
+        50 <= rsi <= 73, stoch_k > stoch_d and 20 <= stoch_k <= 78,
+        prev_bulls < 2, clean_bull, tick_up
     ]
 
     put_checks = [
-        bear_ema,
-        macd_bear,
-        mom_bear,
-        in_bear_keltner,
-        28 <= rsi <= 50,
-        stoch_k < stoch_d and 24 <= stoch_k <= 80,
-        prev_bears < 2,
-        early_bear_candle,
-        tick_down
+        sar_sell, bear_ema, macd_bear, mom_bear, in_bear_keltner,
+        27 <= rsi <= 50, stoch_k < stoch_d and 22 <= stoch_k <= 80,
+        prev_bears < 2, clean_bear, tick_down
     ]
 
     call_score = sum(call_checks)
     put_score = sum(put_checks)
 
-    # Автоматичний підбір найкращої експірації (30с, 1m, 2m, 3m) під силу імпульсу та секунду свічки
     def pick_expiration(score, sec):
         if score >= 9:
             return "30с" if sec >= 35 else "1m"
@@ -244,6 +274,33 @@ def parse_assets(raw_assets):
     return result
 
 
+def parse_history_candles(candles_raw):
+    formatted = []
+    if not candles_raw:
+        return formatted
+    for c in candles_raw[-20:]:
+        try:
+            if isinstance(c, dict):
+                t = int(c.get("time") or c.get("timestamp") or 0)
+                o = float(c.get("open", 0))
+                h = float(c.get("high", 0))
+                l = float(c.get("low", 0))
+                cl = float(c.get("close", 0))
+            elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                t = int(c[0])
+                o = float(c[1])
+                cl = float(c[2])
+                h = float(c[3])
+                l = float(c[4])
+            else:
+                continue
+            if o > 0 and cl > 0:
+                formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
+        except Exception:
+            continue
+    return formatted
+
+
 async def market_worker():
     subscribed = set()
     while True:
@@ -262,7 +319,8 @@ async def market_worker():
                         pass
                 new_api = PocketOption(PO_SSID)
                 ok, err = await asyncio.to_thread(new_api.connect)
-                if ok:
+                raw_check = await asyncio.to_thread(new_api.get_assets)
+                if ok or (isinstance(raw_check, dict) and len(raw_check) > 0):
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     logging.info("CONNECTED TO POCKET OPTION")
@@ -271,7 +329,7 @@ async def market_worker():
             except Exception as e:
                 logging.error("CONNECT ERROR: %s", e)
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(10)
             continue
 
         try:
@@ -284,33 +342,22 @@ async def market_worker():
 
         prio = STATE["priority_symbol"]
         open_syms = [s for s, info in STATE["assets"].items() if info.get("is_open")]
+        if prio and prio not in open_syms:
+            open_syms.insert(0, prio)
         symbols = ([prio] if prio in open_syms else []) + [s for s in open_syms if s != prio]
 
         for sym in symbols:
             try:
-                # 1. Якщо свічок ще менше 14 — миттєво завантажуємо готову історію з сервера!
+                if sym not in subscribed:
+                    await asyncio.to_thread(api.subscribe, sym, 60)
+                    subscribed.add(sym)
+                    await asyncio.sleep(0.05)
+
                 if len(STATE["candles"].get(sym, [])) < 14:
                     candles_raw = await asyncio.to_thread(api.get_candles, sym, 60)
-                    if candles_raw and len(candles_raw) >= 14:
-                        formatted = []
-                        for c in candles_raw[-20:]:
-                            if isinstance(c, dict):
-                                formatted.append({
-                                    "time": int(c.get("time", 0)),
-                                    "open": float(c.get("open", 0)),
-                                    "high": float(c.get("high", 0)),
-                                    "low": float(c.get("low", 0)),
-                                    "close": float(c.get("close", 0))
-                                })
-                        if len(formatted) >= 14:
-                            STATE["candles"][sym] = formatted
-
-                # 2. Підписуємось на живі тіки
-                if sym not in subscribed:
-                    if await asyncio.to_thread(api.subscribe, sym, 60):
-                        subscribed.add(sym)
-                    await asyncio.sleep(0.05)
-                    continue
+                    formatted = parse_history_candles(candles_raw)
+                    if len(formatted) >= 14:
+                        STATE["candles"][sym] = formatted
 
                 ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
                 if not ticks:
@@ -378,12 +425,16 @@ async def handle_status(request):
 
 
 async def priority_tick_worker():
-    """Окремий надшвидкий потік (0.15с) виключно для поточної обраної пари"""
+    subscribed_prio = set()
     while True:
         api = STATE["api"]
         prio = STATE["priority_symbol"]
         if api is not None and STATE["connected"] and prio:
             try:
+                if prio not in subscribed_prio:
+                    await asyncio.to_thread(api.subscribe, prio, 60)
+                    subscribed_prio.add(prio)
+
                 ticks = await asyncio.to_thread(api.get_realtime_ticks, prio, 5)
                 if ticks:
                     ts, price = ticks[-1]
