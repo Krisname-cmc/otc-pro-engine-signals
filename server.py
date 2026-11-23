@@ -269,13 +269,14 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Отримання історичних свічок та живих тіків без скидання при перемиканні"""
+    """Миттєве завантаження історії тільки для обраної пари + фоновий збір тіків без затримок"""
+    is_priority = (sym == STATE["priority_symbol"])
     existing = STATE["candles"].get(sym, [])
 
-    # Завантажуємо історію лише один раз, якщо свічок ще менше 14
-    if len(existing) < 14 and hasattr(api, "get_historical_candles"):
+    # Завантажуємо історію свічок ТІЛЬКИ для поточної обраної пари (щоб не блокувати чергу 10-сек таймаутами)
+    if is_priority and len(existing) < 14 and hasattr(api, "get_historical_candles"):
         try:
-            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 30)
+            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 25)
             formatted = parse_history_candles(raw_c)
             if len(formatted) >= 14:
                 STATE["candles"][sym] = formatted[-25:]
