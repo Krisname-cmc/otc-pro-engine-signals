@@ -106,8 +106,7 @@ def analyze_market(candles, recent_ticks):
         return {"status": "WARMING", "collected": len(candles), "needed": 14}
 
     sec_in_minute = int(time.time()) % 60
-    # 1. РОБОЧЕ ВІКНО ВХОДУ: перші 35 секунд свічки (:03 - :35)
-    if sec_in_minute < 3 or sec_in_minute > 35:
+    if sec_in_minute < 3 or sec_in_minute > 42:
         return {
             "status": "WAIT_CANDLE",
             "wait_sec": (3 - sec_in_minute) if sec_in_minute < 3 else (60 - sec_in_minute),
@@ -119,7 +118,7 @@ def analyze_market(candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 2. PARABOLIC SAR (0.02, 0.2)
+    # 1. PARABOLIC SAR (0.02, 0.2)
     psar_val, psar_bull = calculate_psar(highs, lows, step=0.02, max_step=0.2)
     if psar_val is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
@@ -127,13 +126,13 @@ def analyze_market(candles, recent_ticks):
     sar_buy = psar_bull and closes[-1] > psar_val
     sar_sell = (not psar_bull) and closes[-1] < psar_val
 
-    # 3. ТРЕНД EMA (3 та 10)
+    # 2. ТРЕНД EMA (3 та 10)
     ema3 = ema(closes, 3)
     ema10 = ema(closes, 10)
     bull_ema = ema3[-1] > ema10[-1] and ema3[-1] > ema3[-2]
     bear_ema = ema3[-1] < ema10[-1] and ema3[-1] < ema3[-2]
 
-    # 4. KELTNER CHANNEL (запас ходу до 1.35 ATR від центру)
+    # 3. KELTNER CHANNEL (запас ходу до 1.35 ATR від центру)
     tr_list = [
         max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         for i in range(-10, 0)
@@ -148,12 +147,12 @@ def analyze_market(candles, recent_ticks):
     in_bull_zone = ema10[-1] < closes[-1] < safe_upper
     in_bear_zone = safe_lower < closes[-1] < ema10[-1]
 
-    # 5. RSI (5) в активній зоні імпульсу
+    # 4. RSI (5)
     rsi = calculate_rsi(closes, period=5)
     if rsi is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
 
-    # 6. ПІДТВЕРДЖЕННЯ СВІЧКИ, ЖИВОГО ТІКА ТА ЗАХИСТ ВІД 4-Ї СВІЧКИ ПОСПІЛЬ
+    # 5. ПІДТВЕРДЖЕННЯ СВІЧКИ ТА ЖИВОГО ТІКА
     curr_green = closes[-1] > opens[-1]
     curr_red = closes[-1] < opens[-1]
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] >= recent_ticks[-2]
@@ -162,37 +161,45 @@ def analyze_market(candles, recent_ticks):
     prev_bulls = sum(1 for i in range(-4, -1) if closes[i] > opens[i])
     prev_bears = sum(1 for i in range(-4, -1) if closes[i] < opens[i])
 
-    if sar_buy and bull_ema and in_bull_zone and (50 <= rsi <= 72) and curr_green and tick_up and prev_bulls < 3:
+    def choose_expiration(rsi_val, sec_val, is_call):
+        strength = (rsi_val - 50) if is_call else (50 - rsi_val)
+        # Потужний швидкий імпульс у другій половині свічки -> S30
+        if strength >= 14 and sec_val >= 20:
+            return "30с"
+        # Впевнений старт на початку свічки -> M1
+        if strength >= 7 and sec_val <= 20:
+            return "1m"
+        # Спокійний розгін тренду на старті свічки -> M2
+        if sec_val <= 22:
+            return "2m"
+        # Помірний тренд у другій половині свічки (захист від 1-хв корекції) -> M3
+        return "3m"
+
+    if sar_buy and bull_ema and in_bull_zone and (51 <= rsi <= 72) and curr_green and tick_up and prev_bulls < 3:
+        rec_exp = choose_expiration(rsi, sec_in_minute, True)
         return {
             "status": "SIGNAL",
             "direction": "CALL",
-            "rec_exp": "1m",
+            "rec_exp": rec_exp,
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "BUY",
-            "score": "PRO 1M",
+            "score": f"AI AUTO ({rec_exp})",
             "sec": sec_in_minute
         }
 
-    if sar_sell and bear_ema and in_bear_zone and (28 <= rsi <= 50) and curr_red and tick_down and prev_bears < 3:
+    if sar_sell and bear_ema and in_bear_zone and (28 <= rsi <= 49) and curr_red and tick_down and prev_bears < 3:
+        rec_exp = choose_expiration(rsi, sec_in_minute, False)
         return {
             "status": "SIGNAL",
             "direction": "PUT",
-            "rec_exp": "1m",
+            "rec_exp": rec_exp,
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "SELL",
-            "score": "PRO 1M",
+            "score": f"AI AUTO ({rec_exp})",
             "sec": sec_in_minute
         }
-
-    return {
-        "status": "FLAT",
-        "price": closes[-1],
-        "rsi": round(rsi, 1),
-        "sar": "BUY" if sar_buy else "SELL",
-        "sec": sec_in_minute
-    }
 
     return {
         "status": "FLAT",
