@@ -83,9 +83,9 @@ def calculate_stochastic(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=
 
 
 def analyze_market(candles, recent_ticks):
-    """ВАРІАНТ Б: Спокійний трендовий аналіз на M5 (EMA 9/21/50 + Pullback Stochastic + RSI 14)"""
-if not candles or len(candles) < 8:
-    return {"status": "WARMING", "collected": len(candles), "needed": 8}
+    """ВАРІАНТ Б: Спокійний трендовий аналіз на M5 (EMA 3/5/8 + Pullback Stochastic + RSI 6)"""
+    if not candles or len(candles) < 8:
+        return {"status": "WARMING", "collected": len(candles), "needed": 8}
 
     sec_in_5m = int(time.time()) % 300
     # Спокійне вікно входу в перші 2.5 хвилини 5-хвилинної свічки (:05 – :150 сек)
@@ -112,17 +112,15 @@ if not candles or len(candles) < 8:
 
     trend_label = "UP-TREND" if uptrend else ("DOWN-TREND" if downtrend else "FLAT")
 
-    # 2. ВІДКАТ ТА РОЗВОРОТ ПО STOCHASTIC (14, 3, 3)
+    # 2. ВІДКАТ ТА РОЗВОРОТ ПО STOCHASTIC (5, 2, 2)
     k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 5, 2, 2)
     if k_now is None:
         return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
 
-    # Для BUY: ціна зробила відкат у тренді (Stochastic охолов < 42) і розвернувся вгору (k_now > k_prev і перетнув d_now)
     pullback_buy = (k_prev <= 42) and (k_now > k_prev) and (k_now > d_now)
-    # Для SELL: ціна зробила відкат вгору на падаючому тренді (Stochastic > 58) і розвернулася вниз
     pullback_sell = (k_prev >= 58) and (k_now < k_prev) and (k_now < d_now)
 
-    # 3. ПІДТВЕРДЖЕННЯ СИЛИ ТРЕНДУ RSI (14)
+    # 3. ПІДТВЕРДЖЕННЯ СИЛИ ТРЕНДУ RSI (6)
     rsi14 = calculate_rsi(closes, period=6)
     if rsi14 is None:
         return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
@@ -134,7 +132,6 @@ if not candles or len(candles) < 8:
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] <= recent_ticks[-2]
 
     if uptrend and pullback_buy and (50 <= rsi14 <= 68) and curr_green and tick_up:
-        # Якщо увійшли на самому початку M5 свічки (< 60с) -> 5m, якщо пізніше -> 10m (2 свічки M5)
         rec_exp = "5m" if sec_in_5m <= 60 else "10m"
         return {
             "status": "SIGNAL",
@@ -168,7 +165,6 @@ if not candles or len(candles) < 8:
         "trend": trend_label,
         "sec": sec_in_5m % 60
     }
-
 
 def parse_assets(raw_assets):
     result = {}
