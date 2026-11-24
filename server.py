@@ -224,44 +224,11 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Миттєвий збір M5 свічок без виклику get_historical_candles (0 таймаутів)"""
+    """Паралельний збір M5 свічок для кожної 92% пари одночасно"""
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
-        await asyncio.to_thread(api.subscribe, sym, 300)
+        await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
-
-    # Перевіряємо внутрішній кеш бібліотеки, куди subscribe автоматично завантажує історію
-    raw_cache = None
-    for attr_path in [("api", "candles"), ("candles",), ("_candles",)]:
-        obj = api
-        for p in attr_path:
-            obj = getattr(obj, p, None)
-            if obj is None:
-                break
-        if isinstance(obj, dict) and sym in obj and obj[sym]:
-            raw_cache = obj[sym]
-            break
-
-    if raw_cache and len(STATE["candles"].get(sym, [])) < 12:
-        formatted = []
-        for c in list(raw_cache)[-35:]:
-            try:
-                if isinstance(c, dict):
-                    t = int(c.get("time") or c.get("timestamp") or 0)
-                    o = float(c.get("open", 0))
-                    h = float(c.get("high", 0))
-                    l = float(c.get("low", 0))
-                    cl = float(c.get("close", 0))
-                elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                    t, o, cl, h, l = int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4])
-                else:
-                    continue
-                if o > 0 and cl > 0:
-                    formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
-            except Exception:
-                continue
-        if len(formatted) >= 12:
-            STATE["candles"][sym] = formatted[-40:]
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
@@ -286,6 +253,7 @@ async def fetch_symbol_data(api, sym):
             cur["low"] = min(cur["low"], price)
             cur["close"] = price
 
+
 async def market_worker():
     while True:
         api = STATE["api"]
@@ -306,8 +274,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    STATE["hist_loaded"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (INSTANT 92% RADAR)")
+                    logging.info("CONNECTED TO POCKET OPTION (PARALLEL 92% RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -329,23 +296,21 @@ async def market_worker():
         except Exception:
             pass
 
-        # Тримаємо в пам'яті свічки для всіх ТОП-25 активних пар (payout >= 75%),
-        # щоб при стрибку виплати до 92% пара одразу мала готові свічки без очікування!
-        warm_pool = sorted(
-            [s for s, info in STATE["assets"].items() if info.get("is_open") and info.get("payout", 0) >= 75],
-            key=lambda s: STATE["assets"][s].get("payout", 0),
-            reverse=True
-        )[:25]
+        # Беремо ТІЛЬКИ відкриті пари з виплатою >= 92%
+        high_payout_syms = [
+            s for s, info in STATE["assets"].items()
+            if info.get("is_open") and info.get("payout", 0) >= 92
+        ]
 
-        for sym in warm_pool:
-            if not api.check_connect():
-                STATE["connected"] = False
-                break
-            try:
-                await fetch_symbol_data(api, sym)
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
+        if high_payout_syms:
+            # Опитуємо ВСІ 92% пари ОДНОЧАСНО (паралельно, а не в черзі!)
+            await asyncio.gather(
+                *(fetch_symbol_data(api, sym) for sym in high_payout_syms),
+                return_exceptions=True
+            )
+            await asyncio.sleep(0.5)
+        else:
+            await asyncio.sleep(1.5)
 
 
 async def on_startup(app):
@@ -361,7 +326,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("INSTANT RADAR 92% RUNNING ON PORT %s", PORT)
+    logging.info("PARALLEL RADAR 92% RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
