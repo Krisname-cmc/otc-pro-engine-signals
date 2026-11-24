@@ -224,11 +224,12 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Паралельний збір M5 свічок для кожної 92% пари одночасно"""
+    """Стабільна підписка по черзі + швидке оновлення M5 свічок для всіх 92% пар"""
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
         await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
+        await asyncio.sleep(0.15)
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
@@ -274,7 +275,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (PARALLEL 92% RADAR)")
+                    logging.info("CONNECTED TO POCKET OPTION (RADAR 92% M5)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -296,22 +297,22 @@ async def market_worker():
         except Exception:
             pass
 
-        # Беремо ТІЛЬКИ відкриті пари з виплатою >= 92%
         high_payout_syms = [
             s for s, info in STATE["assets"].items()
             if info.get("is_open") and info.get("payout", 0) >= 92
         ]
 
-        if high_payout_syms:
-            # Опитуємо ВСІ 92% пари ОДНОЧАСНО (паралельно, а не в черзі!)
-            await asyncio.gather(
-                *(fetch_symbol_data(api, sym) for sym in high_payout_syms),
-                return_exceptions=True
-            )
-            await asyncio.sleep(0.5)
-        else:
-            await asyncio.sleep(1.5)
+        for sym in high_payout_syms:
+            if not api.check_connect():
+                STATE["connected"] = False
+                break
+            try:
+                await fetch_symbol_data(api, sym)
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
 
+        await asyncio.sleep(0.3)
 
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
