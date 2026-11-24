@@ -33,7 +33,6 @@ STATE = {
     "assets": {},
     "candles": {},
     "ticks": {},
-    "priority_symbol": "EURUSD_otc",
     "connected": False
 }
 
@@ -46,7 +45,7 @@ def ema(values, period):
     return result
 
 
-def calculate_rsi(closes, period=14):
+def calculate_rsi(closes, period=6):
     if len(closes) < period + 1:
         return None
     gains, losses = [], []
@@ -62,7 +61,7 @@ def calculate_rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_stochastic(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=3):
+def calculate_stochastic(highs, lows, closes, k_period=6, smooth_k=2, smooth_d=2):
     if len(closes) < k_period + smooth_k + smooth_d:
         return None, None, None
     raw_k = []
@@ -82,89 +81,95 @@ def calculate_stochastic(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=
     return k_line[-1], k_line[-2], d_now
 
 
-def analyze_market(candles, recent_ticks):
-    """ВАРІАНТ Б: Спокійний трендовий аналіз на M5 (EMA 3/5/8 + Pullback Stochastic + RSI 6)"""
-    if not candles or len(candles) < 8:
-        return {"status": "WARMING", "collected": len(candles), "needed": 8}
-
-    sec_in_5m = int(time.time()) % 300
-    # Спокійне вікно входу в перші 2.5 хвилини 5-хвилинної свічки (:05 – :150 сек)
-    if sec_in_5m < 5 or sec_in_5m > 150:
-        wait = (5 - sec_in_5m) if sec_in_5m < 5 else (300 - sec_in_5m)
+def analyze_pair_m5(candles, recent_ticks):
+    """Аналіз M5 для кожного рядка: EMA 5/12 + Stochastic(6,2,2) + RSI(6) + Експірація 5m / 10m / 15m"""
+    if not candles or len(candles) < 12:
         return {
-            "status": "WAIT_CANDLE",
-            "wait_sec": wait,
-            "sec": sec_in_5m % 60
+            "status": "WARMING",
+            "collected": len(candles),
+            "needed": 12,
+            "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
+    sec_in_5m = int(time.time()) % 300
     opens = [float(x["open"]) for x in candles]
     highs = [float(x["high"]) for x in candles]
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. ВІЯЛО ТРЕНДУ EMA (3, 5, 8)
-    ema9 = ema(closes, 3)
-    ema21 = ema(closes, 5)
-    ema50 = ema(closes, min(8, len(closes)))
+    # 1. Тренд EMA 5 / EMA 12
+    ema_fast = ema(closes, 5)
+    ema_slow = ema(closes, min(12, len(closes)))
 
-    uptrend = ema9[-1] > ema21[-1] > ema50[-1] and ema21[-1] > ema21[-3]
-    downtrend = ema9[-1] < ema21[-1] < ema50[-1] and ema21[-1] < ema21[-3]
+    uptrend = ema_fast[-1] > ema_slow[-1] and ema_slow[-1] >= ema_slow[-3]
+    downtrend = ema_fast[-1] < ema_slow[-1] and ema_slow[-1] <= ema_slow[-3]
+    trend_label = "UP" if uptrend else ("DOWN" if downtrend else "FLAT")
 
-    trend_label = "UP-TREND" if uptrend else ("DOWN-TREND" if downtrend else "FLAT")
+    # 2. Відкат Stochastic (6, 2, 2)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 6, 2, 2)
+    rsi6 = calculate_rsi(closes, period=6)
 
-    # 2. ВІДКАТ ТА РОЗВОРОТ ПО STOCHASTIC (5, 2, 2)
-    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 5, 2, 2)
-    if k_now is None:
-        return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
+    if k_now is None or rsi6 is None:
+        return {"status": "FLAT", "price": closes[-1], "trend": trend_label}
 
-    pullback_buy = (k_prev <= 42) and (k_now > k_prev) and (k_now > d_now)
-    pullback_sell = (k_prev >= 58) and (k_now < k_prev) and (k_now < d_now)
+    # Перевірка вікна свічки (перші 4 хвилини M5 свічки)
+    if sec_in_5m < 3 or sec_in_5m > 240:
+        return {
+            "status": "WAIT",
+            "price": closes[-1],
+            "rsi": round(rsi6, 1),
+            "stoch": round(k_now, 1),
+            "trend": trend_label
+        }
 
-    # 3. ПІДТВЕРДЖЕННЯ СИЛИ ТРЕНДУ RSI (6)
-    rsi14 = calculate_rsi(closes, period=6)
-    if rsi14 is None:
-        return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
+    pullback_buy = (k_prev <= 46) and (k_now > k_prev) and (k_now >= d_now)
+    pullback_sell = (k_prev >= 54) and (k_now < k_prev) and (k_now <= d_now)
 
-    # 4. ПІДТВЕРДЖЕННЯ ПОТОЧНОЇ СВІЧКИ ТА ТІКА
-    curr_green = closes[-1] > opens[-1] and closes[-1] > ema21[-1]
-    curr_red = closes[-1] < opens[-1] and closes[-1] < ema21[-1]
+    curr_green = closes[-1] > opens[-1]
+    curr_red = closes[-1] < opens[-1]
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] >= recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] <= recent_ticks[-2]
 
-    if uptrend and pullback_buy and (50 <= rsi14 <= 68) and curr_green and tick_up:
-        rec_exp = "5m" if sec_in_5m <= 60 else "10m"
+    def pick_exp(sec_val, rsi_val, is_call):
+        strength = (rsi_val - 50) if is_call else (50 - rsi_val)
+        if sec_val <= 75 and strength >= 6:
+            return "5m"
+        if sec_val <= 165:
+            return "10m"
+        return "15m"
+
+    if uptrend and pullback_buy and (48 <= rsi6 <= 72) and curr_green and tick_up:
+        rec_exp = pick_exp(sec_in_5m, rsi6, True)
         return {
             "status": "SIGNAL",
-            "direction": "CALL",
+            "direction": "BUY",
             "rec_exp": rec_exp,
             "price": closes[-1],
-            "rsi": round(rsi14, 1),
+            "rsi": round(rsi6, 1),
             "stoch": round(k_now, 1),
-            "trend": "UP-TREND",
-            "sec": sec_in_5m % 60
+            "trend": "UP"
         }
 
-    if downtrend and pullback_sell and (32 <= rsi14 <= 50) and curr_red and tick_down:
-        rec_exp = "5m" if sec_in_5m <= 60 else "10m"
+    if downtrend and pullback_sell and (28 <= rsi6 <= 52) and curr_red and tick_down:
+        rec_exp = pick_exp(sec_in_5m, rsi6, False)
         return {
             "status": "SIGNAL",
-            "direction": "PUT",
+            "direction": "SELL",
             "rec_exp": rec_exp,
             "price": closes[-1],
-            "rsi": round(rsi14, 1),
+            "rsi": round(rsi6, 1),
             "stoch": round(k_now, 1),
-            "trend": "DOWN-TREND",
-            "sec": sec_in_5m % 60
+            "trend": "DOWN"
         }
 
     return {
         "status": "FLAT",
         "price": closes[-1],
-        "rsi": round(rsi14, 1),
+        "rsi": round(rsi6, 1),
         "stoch": round(k_now, 1),
-        "trend": trend_label,
-        "sec": sec_in_5m % 60
+        "trend": trend_label
     }
+
 
 def parse_assets(raw_assets):
     result = {}
@@ -182,33 +187,6 @@ def parse_assets(raw_assets):
     return result
 
 
-def parse_history_candles(candles_raw):
-    formatted = []
-    if not candles_raw:
-        return formatted
-    for c in candles_raw[-55:]:
-        try:
-            if isinstance(c, dict):
-                t = int(c.get("time") or c.get("timestamp") or 0)
-                o = float(c.get("open", 0))
-                h = float(c.get("high", 0))
-                l = float(c.get("low", 0))
-                cl = float(c.get("close", 0))
-            elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                t = int(c[0])
-                o = float(c[1])
-                cl = float(c[2])
-                h = float(c[3])
-                l = float(c[4])
-            else:
-                continue
-            if o > 0 and cl > 0:
-                formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
-        except Exception:
-            continue
-    return formatted
-
-
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
@@ -222,30 +200,31 @@ async def cors_middleware(request, handler):
 
 
 async def handle_status(request):
-    symbol = request.query.get("symbol", "EURUSD_otc")
-    STATE["priority_symbol"] = symbol
+    rows = []
+    for sym, info in STATE["assets"].items():
+        if info.get("is_open") and info.get("payout", 0) >= 92:
+            c_list = STATE["candles"].get(sym, [])
+            t_list = STATE["ticks"].get(sym, [])
+            res = analyze_pair_m5(c_list, t_list)
+            rows.append({
+                "symbol": sym,
+                "payout": int(info["payout"]),
+                **res
+            })
 
-    candles = STATE["candles"].get(symbol, [])
-    recent_ticks = STATE["ticks"].get(symbol, [])
-    analysis = analyze_market(candles, recent_ticks)
-
-    sorted_pairs = sorted(
-        [{"symbol": k, "payout": int(v["payout"])} for k, v in STATE["assets"].items() if v.get("is_open")],
-        key=lambda x: x["payout"],
-        reverse=True
-    )
+    # Сортуємо так, щоб пари з активними сигналами (BUY / SELL) завжди піднімалися на самий верх списку!
+    priority_order = {"SIGNAL": 0, "WAIT": 1, "FLAT": 2, "WARMING": 3}
+    rows.sort(key=lambda r: (priority_order.get(r.get("status"), 9), r["symbol"]))
 
     return web.json_response({
         "connected": STATE["connected"],
-        "symbol": symbol,
         "time": datetime.now(KYIV_TZ).strftime("%H:%M:%S"),
-        "analysis": analysis,
-        "pairs": sorted_pairs
+        "rows": rows
     })
 
 
 async def fetch_symbol_data(api, sym):
-    """Швидкий збір 5-хвилинних свічок (period=300) без таймаутів"""
+    """Підписка на M5 (period=300) та швидке оновлення свічок без таймаутів"""
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
         await asyncio.to_thread(api.subscribe, sym, 300)
@@ -266,8 +245,8 @@ async def fetch_symbol_data(api, sym):
         hist = STATE["candles"].setdefault(sym, [])
         if not hist or hist[-1]["time"] < bucket:
             hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
-            if len(hist) > 55:
-                STATE["candles"][sym] = hist[-55:]
+            if len(hist) > 40:
+                STATE["candles"][sym] = hist[-40:]
         else:
             cur = hist[-1]
             cur["high"] = max(cur["high"], price)
@@ -295,7 +274,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (M5 92%+ ENGINE)")
+                    logging.info("CONNECTED TO POCKET OPTION (RADAR 92% M5)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -317,16 +296,11 @@ async def market_worker():
         except Exception:
             pass
 
-        prio = STATE["priority_symbol"]
-        # Скануємо одночасно ТІЛЬКИ відкриті пари з виплатою >= 92%
+        # Одночасно скануємо ТІЛЬКИ пари з виплатою >= 92%
         high_payout_syms = [
             s for s, info in STATE["assets"].items()
             if info.get("is_open") and info.get("payout", 0) >= 92
         ]
-
-        # Якщо поточна обрана вами пара має менше 92%, теж тримаємо її в циклі, щоб екран не зависав
-        if prio and prio not in high_payout_syms:
-            high_payout_syms.insert(0, prio)
 
         for sym in high_payout_syms:
             if not api.check_connect():
@@ -336,27 +310,14 @@ async def market_worker():
                 await fetch_symbol_data(api, sym)
             except Exception:
                 pass
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.05)
 
-        # Якщо пар із 92% зараз мало або немає — невелика пауза, щоб не навантажувати процесор
-        if len(high_payout_syms) <= 1:
-            await asyncio.sleep(1.0)
-
-async def priority_tick_worker():
-    while True:
-        api = STATE["api"]
-        prio = STATE["priority_symbol"]
-        if api is not None and STATE["connected"] and api.check_connect() and prio:
-            try:
-                await fetch_symbol_data(api, prio)
-            except Exception:
-                pass
-        await asyncio.sleep(0.35)
+        if not high_payout_syms:
+            await asyncio.sleep(1.5)
 
 
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
-    app["prio_worker"] = asyncio.create_task(priority_tick_worker())
 
 
 async def main():
@@ -368,7 +329,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("WEB ENGINE M5 RUNNING ON PORT %s", PORT)
+    logging.info("RADAR 92% ENGINE RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
