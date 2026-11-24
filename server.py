@@ -295,7 +295,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (M5 ENGINE OK)")
+                    logging.info("CONNECTED TO POCKET OPTION (M5 92%+ ENGINE)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -318,10 +318,17 @@ async def market_worker():
             pass
 
         prio = STATE["priority_symbol"]
-        open_syms = [s for s, info in STATE["assets"].items() if info.get("is_open")]
-        symbols = [s for s in open_syms if s != prio]
+        # Скануємо одночасно ТІЛЬКИ відкриті пари з виплатою >= 92%
+        high_payout_syms = [
+            s for s, info in STATE["assets"].items()
+            if info.get("is_open") and info.get("payout", 0) >= 92
+        ]
 
-        for sym in symbols:
+        # Якщо поточна обрана вами пара має менше 92%, теж тримаємо її в циклі, щоб екран не зависав
+        if prio and prio not in high_payout_syms:
+            high_payout_syms.insert(0, prio)
+
+        for sym in high_payout_syms:
             if not api.check_connect():
                 STATE["connected"] = False
                 break
@@ -329,8 +336,11 @@ async def market_worker():
                 await fetch_symbol_data(api, sym)
             except Exception:
                 pass
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.08)
 
+        # Якщо пар із 92% зараз мало або немає — невелика пауза, щоб не навантажувати процесор
+        if len(high_payout_syms) <= 1:
+            await asyncio.sleep(1.0)
 
 async def priority_tick_worker():
     while True:
