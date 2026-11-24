@@ -84,8 +84,8 @@ def calculate_stochastic(highs, lows, closes, k_period=14, smooth_k=3, smooth_d=
 
 def analyze_market(candles, recent_ticks):
     """ВАРІАНТ Б: Спокійний трендовий аналіз на M5 (EMA 9/21/50 + Pullback Stochastic + RSI 14)"""
-    if not candles or len(candles) < 25:
-        return {"status": "WARMING", "collected": len(candles), "needed": 25}
+if not candles or len(candles) < 8:
+    return {"status": "WARMING", "collected": len(candles), "needed": 8}
 
     sec_in_5m = int(time.time()) % 300
     # Спокійне вікно входу в перші 2.5 хвилини 5-хвилинної свічки (:05 – :150 сек)
@@ -102,10 +102,10 @@ def analyze_market(candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. ВІЯЛО ТРЕНДУ EMA (9, 21, 50)
-    ema9 = ema(closes, 9)
-    ema21 = ema(closes, 21)
-    ema50 = ema(closes, min(50, len(closes)))
+    # 1. ВІЯЛО ТРЕНДУ EMA (3, 5, 8)
+    ema9 = ema(closes, 3)
+    ema21 = ema(closes, 5)
+    ema50 = ema(closes, min(8, len(closes)))
 
     uptrend = ema9[-1] > ema21[-1] > ema50[-1] and ema21[-1] > ema21[-3]
     downtrend = ema9[-1] < ema21[-1] < ema50[-1] and ema21[-1] < ema21[-3]
@@ -113,7 +113,7 @@ def analyze_market(candles, recent_ticks):
     trend_label = "UP-TREND" if uptrend else ("DOWN-TREND" if downtrend else "FLAT")
 
     # 2. ВІДКАТ ТА РОЗВОРОТ ПО STOCHASTIC (14, 3, 3)
-    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 14, 3, 3)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 5, 2, 2)
     if k_now is None:
         return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
 
@@ -123,7 +123,7 @@ def analyze_market(candles, recent_ticks):
     pullback_sell = (k_prev >= 58) and (k_now < k_prev) and (k_now < d_now)
 
     # 3. ПІДТВЕРДЖЕННЯ СИЛИ ТРЕНДУ RSI (14)
-    rsi14 = calculate_rsi(closes, period=14)
+    rsi14 = calculate_rsi(closes, period=6)
     if rsi14 is None:
         return {"status": "FLAT", "price": closes[-1], "trend": trend_label, "sec": sec_in_5m % 60}
 
