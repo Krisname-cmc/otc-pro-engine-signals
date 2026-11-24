@@ -224,25 +224,21 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Миттєве завантаження історії M5 + живі тіки без затримок"""
+    """Миттєве завантаження історії (через швидкий M1 -> M5) + живі тіки"""
     sub_set = STATE.setdefault("subscribed", set())
     hist_loaded = STATE.setdefault("hist_loaded", set())
 
     if sym not in sub_set:
-        await asyncio.to_thread(api.subscribe, sym, 300)
+        await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
 
-    # Одноразове швидке завантаження 12 свічок історії (3600 сек) без таймаутів
     if sym not in hist_loaded and hasattr(api, "get_historical_candles"):
         hist_loaded.add(sym)
         try:
-            raw_c = await asyncio.wait_for(
-                asyncio.to_thread(api.get_historical_candles, sym, 300, 3600),
-                timeout=3.0
-            )
+            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 80)
             if raw_c:
-                formatted = []
-                for c in raw_c[-25:]:
+                m5_map = {}
+                for c in raw_c:
                     if isinstance(c, dict):
                         t = int(c.get("time") or c.get("timestamp") or 0)
                         o, h, l, cl = float(c.get("open", 0)), float(c.get("high", 0)), float(c.get("low", 0)), float(c.get("close", 0))
@@ -251,9 +247,16 @@ async def fetch_symbol_data(api, sym):
                     else:
                         continue
                     if o > 0 and cl > 0:
-                        formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
-                if len(formatted) >= 12:
-                    STATE["candles"][sym] = formatted[-40:]
+                        b = (t // 300) * 300
+                        if b not in m5_map:
+                            m5_map[b] = {"time": b, "open": o, "high": h, "low": l, "close": cl}
+                        else:
+                            m5_map[b]["high"] = max(m5_map[b]["high"], h)
+                            m5_map[b]["low"] = min(m5_map[b]["low"], l)
+                            m5_map[b]["close"] = cl
+                m5_list = [m5_map[k] for k in sorted(m5_map.keys())]
+                if len(m5_list) >= 12:
+                    STATE["candles"][sym] = m5_list[-40:]
         except Exception:
             pass
 
