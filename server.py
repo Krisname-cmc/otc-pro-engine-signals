@@ -106,7 +106,7 @@ def analyze_pair_m5(candles, recent_ticks):
     trend_label = "UP" if uptrend else ("DOWN" if downtrend else "FLAT")
 
     # 2. Відкат Stochastic (3, 2, 2)
-    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 3, 2, 2)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 2, 1, 2)
     rsi6 = calculate_rsi(closes, period=3)
 
     if k_now is None or rsi6 is None:
