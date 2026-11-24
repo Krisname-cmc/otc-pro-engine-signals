@@ -224,41 +224,44 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Миттєве завантаження історії (через швидкий M1 -> M5) + живі тіки"""
+    """Миттєвий збір M5 свічок без виклику get_historical_candles (0 таймаутів)"""
     sub_set = STATE.setdefault("subscribed", set())
-    hist_loaded = STATE.setdefault("hist_loaded", set())
-
     if sym not in sub_set:
-        await asyncio.to_thread(api.subscribe, sym, 60)
+        await asyncio.to_thread(api.subscribe, sym, 300)
         sub_set.add(sym)
 
-    if sym not in hist_loaded and hasattr(api, "get_historical_candles"):
-        hist_loaded.add(sym)
-        try:
-            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 80)
-            if raw_c:
-                m5_map = {}
-                for c in raw_c:
-                    if isinstance(c, dict):
-                        t = int(c.get("time") or c.get("timestamp") or 0)
-                        o, h, l, cl = float(c.get("open", 0)), float(c.get("high", 0)), float(c.get("low", 0)), float(c.get("close", 0))
-                    elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                        t, o, cl, h, l = int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4])
-                    else:
-                        continue
-                    if o > 0 and cl > 0:
-                        b = (t // 300) * 300
-                        if b not in m5_map:
-                            m5_map[b] = {"time": b, "open": o, "high": h, "low": l, "close": cl}
-                        else:
-                            m5_map[b]["high"] = max(m5_map[b]["high"], h)
-                            m5_map[b]["low"] = min(m5_map[b]["low"], l)
-                            m5_map[b]["close"] = cl
-                m5_list = [m5_map[k] for k in sorted(m5_map.keys())]
-                if len(m5_list) >= 12:
-                    STATE["candles"][sym] = m5_list[-40:]
-        except Exception:
-            pass
+    # Перевіряємо внутрішній кеш бібліотеки, куди subscribe автоматично завантажує історію
+    raw_cache = None
+    for attr_path in [("api", "candles"), ("candles",), ("_candles",)]:
+        obj = api
+        for p in attr_path:
+            obj = getattr(obj, p, None)
+            if obj is None:
+                break
+        if isinstance(obj, dict) and sym in obj and obj[sym]:
+            raw_cache = obj[sym]
+            break
+
+    if raw_cache and len(STATE["candles"].get(sym, [])) < 12:
+        formatted = []
+        for c in list(raw_cache)[-35:]:
+            try:
+                if isinstance(c, dict):
+                    t = int(c.get("time") or c.get("timestamp") or 0)
+                    o = float(c.get("open", 0))
+                    h = float(c.get("high", 0))
+                    l = float(c.get("low", 0))
+                    cl = float(c.get("close", 0))
+                elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                    t, o, cl, h, l = int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                else:
+                    continue
+                if o > 0 and cl > 0:
+                    formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
+            except Exception:
+                continue
+        if len(formatted) >= 12:
+            STATE["candles"][sym] = formatted[-40:]
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
@@ -282,7 +285,6 @@ async def fetch_symbol_data(api, sym):
             cur["high"] = max(cur["high"], price)
             cur["low"] = min(cur["low"], price)
             cur["close"] = price
-
 
 async def market_worker():
     while True:
