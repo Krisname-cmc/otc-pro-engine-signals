@@ -249,23 +249,35 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Завантаження 5-хвилинних свічок (period=300) + живі тіки"""
+    """Завантаження 5-хвилинних свічок (зібраних із швидкої історії M1) + живі тіки"""
     is_priority = (sym == STATE["priority_symbol"])
     existing = STATE["candles"].get(sym, [])
 
-    if is_priority and len(existing) < 25 and hasattr(api, "get_historical_candles"):
-        try:
-            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 300, 55)
-            formatted = parse_history_candles(raw_c)
-            if len(formatted) >= 25:
-                STATE["candles"][sym] = formatted[-55:]
-        except Exception:
-            pass
-
     sub_set = STATE.setdefault("subscribed", set())
     if sym not in sub_set:
-        await asyncio.to_thread(api.subscribe, sym, 300)
+        await asyncio.to_thread(api.subscribe, sym, 60)
         sub_set.add(sym)
+        await asyncio.sleep(0.2)
+
+    if is_priority and len(existing) < 25 and hasattr(api, "get_historical_candles"):
+        try:
+            raw_c = await asyncio.to_thread(api.get_historical_candles, sym, 60, 150)
+            m1_candles = parse_history_candles(raw_c)
+            if len(m1_candles) >= 50:
+                m5_map = {}
+                for c in m1_candles:
+                    b = (c["time"] // 300) * 300
+                    if b not in m5_map:
+                        m5_map[b] = {"time": b, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]}
+                    else:
+                        m5_map[b]["high"] = max(m5_map[b]["high"], c["high"])
+                        m5_map[b]["low"] = min(m5_map[b]["low"], c["low"])
+                        m5_map[b]["close"] = c["close"]
+                m5_list = [m5_map[k] for k in sorted(m5_map.keys())]
+                if len(m5_list) >= 25:
+                    STATE["candles"][sym] = m5_list[-55:]
+        except Exception:
+            pass
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
