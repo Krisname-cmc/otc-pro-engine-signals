@@ -82,12 +82,12 @@ def calculate_stochastic(highs, lows, closes, k_period=6, smooth_k=2, smooth_d=2
 
 
 def analyze_pair_m5(candles, recent_ticks):
-    """Аналіз M5 для кожного рядка: EMA 5/12 + Stochastic(6,2,2) + RSI(6) + Експірація 5m / 10m / 15m"""
-    if not candles or len(candles) < 12:
+    """Аналіз M5 для кожного рядка: EMA 2/4 + Stochastic(3,2,2) + RSI(3) + Експірація 5m / 10m / 15m"""
+    if not candles or len(candles) < 4:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 12,
+            "needed": 4,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -97,17 +97,17 @@ def analyze_pair_m5(candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. Тренд EMA 5 / EMA 12
-    ema_fast = ema(closes, 5)
-    ema_slow = ema(closes, min(12, len(closes)))
+    # 1. Тренд EMA 2 / EMA 4
+    ema_fast = ema(closes, 2)
+    ema_slow = ema(closes, min(4, len(closes)))
 
     uptrend = ema_fast[-1] > ema_slow[-1] and ema_slow[-1] >= ema_slow[-3]
     downtrend = ema_fast[-1] < ema_slow[-1] and ema_slow[-1] <= ema_slow[-3]
     trend_label = "UP" if uptrend else ("DOWN" if downtrend else "FLAT")
 
-    # 2. Відкат Stochastic (6, 2, 2)
-    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 6, 2, 2)
-    rsi6 = calculate_rsi(closes, period=6)
+    # 2. Відкат Stochastic (3, 2, 2)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, 3, 2, 2)
+    rsi6 = calculate_rsi(closes, period=3)
 
     if k_now is None or rsi6 is None:
         return {"status": "FLAT", "price": closes[-1], "trend": trend_label}
