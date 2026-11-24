@@ -106,11 +106,11 @@ def analyze_market(candles, recent_ticks):
         return {"status": "WARMING", "collected": len(candles), "needed": 14}
 
     sec_in_minute = int(time.time()) % 60
-    # Входимо на початку та в середині хвилинної свічки (з 2-ї по 45-ту секунду)
-    if sec_in_minute < 2 or sec_in_minute > 45:
+    # 1. СУВОРИЙ ТАЙМІНГ: входимо тільки на початку свічки (:03 - :18 сек), щоб угода 1m закрилася в цій же хвилі
+    if sec_in_minute < 3 or sec_in_minute > 18:
         return {
             "status": "WAIT_CANDLE",
-            "wait_sec": (2 - sec_in_minute) if sec_in_minute < 2 else (60 - sec_in_minute),
+            "wait_sec": (3 - sec_in_minute) if sec_in_minute < 3 else (60 - sec_in_minute),
             "sec": sec_in_minute
         }
 
@@ -119,7 +119,7 @@ def analyze_market(candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    # 1. PARABOLIC SAR (0.02, 0.2) — Напрямок хвилі
+    # 2. PARABOLIC SAR (0.02, 0.2) — Напрямок хвилі
     psar_val, psar_bull = calculate_psar(highs, lows, step=0.02, max_step=0.2)
     if psar_val is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
@@ -127,38 +127,43 @@ def analyze_market(candles, recent_ticks):
     sar_buy = psar_bull and closes[-1] > psar_val
     sar_sell = (not psar_bull) and closes[-1] < psar_val
 
-    # 2. ТРЕНД EMA (3 та 10)
+    # 3. ТРЕНД EMA (3 та 10) з підтвердженням кута нахилу
     ema3 = ema(closes, 3)
     ema10 = ema(closes, 10)
-    bull_ema = ema3[-1] > ema10[-1] and ema3[-1] > ema3[-2]
-    bear_ema = ema3[-1] < ema10[-1] and ema3[-1] < ema3[-2]
+    bull_ema = ema3[-1] > ema10[-1] and ema3[-1] > ema3[-2] and ema10[-1] >= ema10[-2]
+    bear_ema = ema3[-1] < ema10[-1] and ema3[-1] < ema3[-2] and ema10[-1] <= ema10[-2]
 
-    # 3. KELTNER CHANNEL (EMA 10, ATR 10) — Захист від входу на піку
+    # 4. KELTNER CHANNEL (Зона із запасом ходу: входимо лише в перші 65% каналу від центру!)
     tr_list = [
         max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         for i in range(-10, 0)
     ]
     atr10 = statistics.mean(tr_list)
-    kc_upper = ema10[-1] + (1.5 * atr10)
-    kc_lower = ema10[-1] - (1.5 * atr10)
+    if atr10 <= 0:
+        return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
 
-    in_bull_keltner = (atr10 > 0) and (ema10[-1] < closes[-1] < kc_upper)
-    in_bear_keltner = (atr10 > 0) and (kc_lower < closes[-1] < ema10[-1])
+    safe_upper = ema10[-1] + (1.0 * atr10)
+    safe_lower = ema10[-1] - (1.0 * atr10)
 
-    # 4. RSI (період 5) + ЖИВИЙ ТІК
+    in_bull_zone = ema10[-1] < closes[-1] < safe_upper
+    in_bear_zone = safe_lower < closes[-1] < ema10[-1]
+
+    # 5. RSI (5) в оптимальному імпульсному коридорі (без перекупленості > 68 і перепроданості < 32)
     rsi = calculate_rsi(closes, period=5)
     if rsi is None:
         return {"status": "FLAT", "price": closes[-1], "sec": sec_in_minute}
 
-    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] >= recent_ticks[-2]
-    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] <= recent_ticks[-2]
+    # 6. ПІДТВЕРДЖЕННЯ ПОТОЧНОЇ СВІЧКИ ТА ЖИВОГО ТІКА
+    curr_green = closes[-1] > opens[-1]
+    curr_red = closes[-1] < opens[-1]
+    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
+    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
-    # Анти-виснаження (не входимо після 3 свічок одного кольору підряд)
-    prev_bulls = sum(1 for i in range(-4, -1) if closes[i] > opens[i])
-    prev_bears = sum(1 for i in range(-4, -1) if closes[i] < opens[i])
+    # Не заходимо, якщо вже було 2 сильні свічки в цей бік поспіль (захист від відкату на 3-й свічці)
+    prev_bulls = sum(1 for i in range(-3, -1) if closes[i] > opens[i])
+    prev_bears = sum(1 for i in range(-3, -1) if closes[i] < opens[i])
 
-    # ЧІТКИЙ ВХІД ПО 4 КЛЮЧОВИХ ФІЛЬТРАХ (Експірація 1m)
-    if sar_buy and bull_ema and in_bull_keltner and (50 <= rsi <= 74) and tick_up and prev_bulls < 3:
+    if sar_buy and bull_ema and in_bull_zone and (53 <= rsi <= 68) and curr_green and tick_up and prev_bulls < 2:
         return {
             "status": "SIGNAL",
             "direction": "CALL",
@@ -166,11 +171,11 @@ def analyze_market(candles, recent_ticks):
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "BUY",
-            "score": "4/4 (SAR+Keltner+RSI)",
+            "score": "SNIPER 1M",
             "sec": sec_in_minute
         }
 
-    if sar_sell and bear_ema and in_bear_keltner and (26 <= rsi <= 50) and tick_down and prev_bears < 3:
+    if sar_sell and bear_ema and in_bear_zone and (32 <= rsi <= 47) and curr_red and tick_down and prev_bears < 2:
         return {
             "status": "SIGNAL",
             "direction": "PUT",
@@ -178,9 +183,17 @@ def analyze_market(candles, recent_ticks):
             "price": closes[-1],
             "rsi": round(rsi, 1),
             "sar": "SELL",
-            "score": "4/4 (SAR+Keltner+RSI)",
+            "score": "SNIPER 1M",
             "sec": sec_in_minute
         }
+
+    return {
+        "status": "FLAT",
+        "price": closes[-1],
+        "rsi": round(rsi, 1),
+        "sar": "BUY" if sar_buy else "SELL",
+        "sec": sec_in_minute
+    }
 
     return {
         "status": "FLAT",
