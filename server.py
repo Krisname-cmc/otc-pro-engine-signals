@@ -224,11 +224,38 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Підписка на M5 (period=300) та швидке оновлення свічок без таймаутів"""
+    """Миттєве завантаження історії M5 + живі тіки без затримок"""
     sub_set = STATE.setdefault("subscribed", set())
+    hist_loaded = STATE.setdefault("hist_loaded", set())
+
     if sym not in sub_set:
         await asyncio.to_thread(api.subscribe, sym, 300)
         sub_set.add(sym)
+
+    # Одноразове швидке завантаження 12 свічок історії (3600 сек) без таймаутів
+    if sym not in hist_loaded and hasattr(api, "get_historical_candles"):
+        hist_loaded.add(sym)
+        try:
+            raw_c = await asyncio.wait_for(
+                asyncio.to_thread(api.get_historical_candles, sym, 300, 3600),
+                timeout=3.0
+            )
+            if raw_c:
+                formatted = []
+                for c in raw_c[-25:]:
+                    if isinstance(c, dict):
+                        t = int(c.get("time") or c.get("timestamp") or 0)
+                        o, h, l, cl = float(c.get("open", 0)), float(c.get("high", 0)), float(c.get("low", 0)), float(c.get("close", 0))
+                    elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                        t, o, cl, h, l = int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                    else:
+                        continue
+                    if o > 0 and cl > 0:
+                        formatted.append({"time": t, "open": o, "high": h, "low": l, "close": cl})
+                if len(formatted) >= 12:
+                    STATE["candles"][sym] = formatted[-40:]
+        except Exception:
+            pass
 
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
@@ -274,7 +301,8 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (RADAR 92% M5)")
+                    STATE["hist_loaded"] = set()
+                    logging.info("CONNECTED TO POCKET OPTION (INSTANT 92% RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -296,13 +324,15 @@ async def market_worker():
         except Exception:
             pass
 
-        # Одночасно скануємо ТІЛЬКИ пари з виплатою >= 92%
-        high_payout_syms = [
-            s for s, info in STATE["assets"].items()
-            if info.get("is_open") and info.get("payout", 0) >= 92
-        ]
+        # Тримаємо в пам'яті свічки для всіх ТОП-25 активних пар (payout >= 75%),
+        # щоб при стрибку виплати до 92% пара одразу мала готові свічки без очікування!
+        warm_pool = sorted(
+            [s for s, info in STATE["assets"].items() if info.get("is_open") and info.get("payout", 0) >= 75],
+            key=lambda s: STATE["assets"][s].get("payout", 0),
+            reverse=True
+        )[:25]
 
-        for sym in high_payout_syms:
+        for sym in warm_pool:
             if not api.check_connect():
                 STATE["connected"] = False
                 break
@@ -311,9 +341,6 @@ async def market_worker():
             except Exception:
                 pass
             await asyncio.sleep(0.05)
-
-        if not high_payout_syms:
-            await asyncio.sleep(1.5)
 
 
 async def on_startup(app):
@@ -329,7 +356,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("RADAR 92% ENGINE RUNNING ON PORT %s", PORT)
+    logging.info("INSTANT RADAR 92% RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
