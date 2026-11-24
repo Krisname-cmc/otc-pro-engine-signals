@@ -354,6 +354,10 @@ async def market_worker():
             await asyncio.sleep(10)
             continue
 
+        if not api.check_connect():
+            STATE["connected"] = False
+            continue
+
         try:
             raw = await asyncio.to_thread(api.get_assets)
             parsed = parse_assets(raw)
@@ -369,6 +373,9 @@ async def market_worker():
         symbols = ([prio] if prio in open_syms else []) + [s for s in open_syms if s != prio]
 
         for sym in symbols:
+            if not api.check_connect():
+                STATE["connected"] = False
+                break
             try:
                 await fetch_symbol_data(api, sym)
             except Exception as e:
@@ -381,7 +388,7 @@ async def priority_tick_worker():
     while True:
         api = STATE["api"]
         prio = STATE["priority_symbol"]
-        if api is not None and STATE["connected"] and prio:
+        if api is not None and STATE["connected"] and api.check_connect() and prio:
             try:
                 sub_set = STATE.setdefault("subscribed", set())
                 if prio not in sub_set:
@@ -414,3 +421,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
