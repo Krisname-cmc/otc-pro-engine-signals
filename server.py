@@ -246,7 +246,6 @@ def update_all_symbols_sync(api, symbols):
 
 
 async def market_worker():
-    batch_idx = 0
     while True:
         api = STATE["api"]
         if api is None or not STATE["connected"]:
@@ -265,7 +264,8 @@ async def market_worker():
                 if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
-                    logging.info("CONNECTED TO POCKET OPTION (LOW-THREAD 92% RADAR)")
+                    STATE["subscribed"] = set()
+                    logging.info("CONNECTED TO POCKET OPTION (88%+ FOREX RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -287,33 +287,36 @@ async def market_worker():
         except Exception:
             pass
 
-        all_otc_open = sorted([s for s, info in STATE["assets"].items() if info.get("is_open")])
-        if not all_otc_open:
+        # Скануємо ТІЛЬКИ відкриті валютні пари з виплатою >= 88% (захист від спам-фільтра Pocket Option)
+        top_88_syms = sorted([
+            s for s, info in STATE["assets"].items()
+            if info.get("is_open") and info.get("payout", 0) >= 88
+        ])
+
+        if not top_88_syms:
             await asyncio.sleep(2)
             continue
 
-        high_92 = [s for s in all_otc_open if STATE["assets"][s].get("payout", 0) >= 92]
-        others = [s for s in all_otc_open if s not in high_92]
-
-        batch = others[batch_idx:batch_idx + 6]
-        batch_idx = 0 if (batch_idx + 6) >= len(others) else (batch_idx + 6)
-
-        for sym in (high_92 + batch):
+        # 1. Одноразова легка підписка на пари 88%+ (без повторного спаму в кожному циклі!)
+        sub_set = STATE.setdefault("subscribed", set())
+        for sym in top_88_syms:
             if not api.check_connect():
                 STATE["connected"] = False
                 break
-            try:
-                await asyncio.to_thread(api.subscribe, sym, 60)
-                await asyncio.sleep(0.05)
-            except Exception:
-                pass
+            if sym not in sub_set:
+                try:
+                    await asyncio.to_thread(api.subscribe, sym, 60)
+                    sub_set.add(sym)
+                    await asyncio.sleep(0.15)
+                except Exception:
+                    pass
 
         if not STATE["connected"]:
             continue
 
-        # Зчитуємо всі валютні пари одним-єдиним потоком (без помилки can't start new thread!)
-        await asyncio.to_thread(update_all_symbols_sync, api, all_otc_open)
-        await asyncio.sleep(0.8)
+        # 2. Зчитуємо свічки лише для пар 88%+ одним легким потоком
+        await asyncio.to_thread(update_all_symbols_sync, api, top_88_syms)
+        await asyncio.sleep(1.0)
 
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
