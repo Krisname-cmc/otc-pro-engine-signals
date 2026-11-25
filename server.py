@@ -55,35 +55,33 @@ def calculate_rsi(closes, period=6):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.65):
-    if len(closes) < period + 1:
+def calculate_donchian_and_wpr(highs, lows, closes, period=8):
+    if len(closes) < period + 2:
         return None, None, None, None
-    window = closes[-period:]
-    mid = statistics.mean(window)
-    std = statistics.pstdev(window)
-    upper = mid + mult * std
-    lower = mid - mult * std
+    # 1. DONCHIAN CHANNEL по попередніх закритих свічках (нерухомий тунель!)
+    upper = max(highs[-(period + 1):-1])
+    lower = min(lows[-(period + 1):-1])
 
-    def cci_at(idx_end):
-        tp_list = [(highs[i] + lows[i] + closes[i]) / 3.0 for i in range(idx_end - period, idx_end)]
-        tp_mean = statistics.mean(tp_list)
-        mean_dev = statistics.mean([abs(x - tp_mean) for x in tp_list])
-        if mean_dev == 0:
-            return 0.0
-        return (tp_list[-1] - tp_mean) / (0.015 * mean_dev)
+    # 2. WILLIAMS %R для поточної та попередньої свічки (шкала від 0 до -100)
+    def wpr_at(idx_end):
+        h_max = max(highs[idx_end - period:idx_end])
+        l_min = min(lows[idx_end - period:idx_end])
+        if h_max == l_min:
+            return -50.0
+        return ((h_max - closes[idx_end - 1]) / (h_max - l_min)) * -100.0
 
-    cci_now = cci_at(len(closes))
-    cci_prev = cci_at(len(closes) - 1)
-    return upper, lower, cci_now, cci_prev
+    wpr_now = wpr_at(len(closes))
+    wpr_prev = wpr_at(len(closes) - 1)
+    return upper, lower, wpr_now, wpr_prev
 
 
 def analyze_pair_m5(sym, candles, recent_ticks):
-    """M5 Збалансований відбій: Bollinger Bands (8, 1.65) + CCI (8) + RSI (6)"""
-    if not candles or len(candles) < 8:
+    """M5 Нерухомий тунель: Donchian Channel (8) + Williams %R (8) + RSI (6)"""
+    if not candles or len(candles) < 10:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 8,
+            "needed": 10,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -91,7 +89,7 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    upper, lower, cci_now, cci_prev = calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.65)
+    upper, lower, wpr_now, wpr_prev = calculate_donchian_and_wpr(highs, lows, closes, period=8)
     rsi6 = calculate_rsi(closes, period=6)
 
     if upper is None or rsi6 is None:
@@ -100,27 +98,29 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
-    # Перевірка виходу ціни за межі каналу Боллінджера (поточна або попередня свічка)
-    touched_lower = (lows[-1] <= lower) or (closes[-2] <= lower)
-    touched_upper = (highs[-1] >= upper) or (closes[-2] >= upper)
+    # Ціна вперлася або пробила нерухому стіну каналу Дончіана
+    at_bottom = (lows[-1] <= lower) or (lows[-2] <= lower)
+    at_top = (highs[-1] >= upper) or (highs[-2] >= upper)
 
-    # CCI показує перегрів (< -80 або > +80) і починає розвертатися всередину каналу
-    cci_buy = (cci_now <= -80 or cci_prev <= -80) and (cci_now >= cci_prev - 5)
-    cci_sell = (cci_now >= 80 or cci_prev >= 80) and (cci_now <= cci_prev + 5)
+    # Williams %R підтверджує перегрів біля стіни і початок відскоку всередину тунелю
+    wpr_buy = (wpr_prev <= -80 or wpr_now <= -80) and (wpr_now >= wpr_prev)
+    wpr_sell = (wpr_prev >= -20 or wpr_now >= -20) and (wpr_now <= wpr_prev)
 
     sec_in_5m = int(time.time()) % 300
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
     cur_bucket = candles[-1]["time"]
 
-    def pick_exp(cci_abs, sec_val):
-        if cci_abs >= 130:
+    def pick_exp(wpr_val, is_buy, sec_val):
+        extreme = abs(-100 - wpr_val) if is_buy else abs(wpr_val)
+        if extreme <= 8:
             return "5m"
         if sec_val <= 150:
             return "10m"
         return "15m"
 
-    if touched_lower and cci_buy and (rsi6 <= 48) and tick_up:
-        rec_exp = pick_exp(max(abs(cci_now), abs(cci_prev)), sec_in_5m)
+    # BUY: дотик/пробій нижньої межі Donchian + Williams %R <= -80 + RSI <= 46 + тік вгору
+    if at_bottom and wpr_buy and (rsi6 <= 46) and tick_up:
+        rec_exp = pick_exp(min(wpr_now, wpr_prev), True, sec_in_5m)
         sig_data = {
             "direction": "BUY",
             "rec_exp": rec_exp,
@@ -132,8 +132,9 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    elif touched_upper and cci_sell and (rsi6 >= 52) and tick_down:
-        rec_exp = pick_exp(max(abs(cci_now), abs(cci_prev)), sec_in_5m)
+    # SELL: дотик/пробій верхньої межі Donchian + Williams %R >= -20 + RSI >= 54 + тік вниз
+    elif at_top and wpr_sell and (rsi6 >= 54) and tick_down:
+        rec_exp = pick_exp(max(wpr_now, wpr_prev), False, sec_in_5m)
         sig_data = {
             "direction": "SELL",
             "rec_exp": rec_exp,
@@ -149,7 +150,7 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         "status": "READY",
         "price": closes[-1],
         "rsi": round(rsi6, 1),
-        "cci": round(cci_now, 0),
+        "cci": round(wpr_now, 0),
         "cur_bucket": cur_bucket
     }
 
