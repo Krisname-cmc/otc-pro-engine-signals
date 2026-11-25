@@ -220,12 +220,7 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    sub_set = STATE.setdefault("subscribed", set())
-    if sym not in sub_set:
-        await asyncio.to_thread(api.subscribe, sym, 60)
-        sub_set.add(sym)
-        await asyncio.sleep(0.12)
-
+    """Миттєве оновлення M5 свічок для кожної з 40 пар"""
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
         ts, price = ticks[-1]
@@ -270,7 +265,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (BB+CCI 92% RADAR)")
+                    logging.info("CONNECTED TO POCKET OPTION (ALL 40 ASSETS ENGINE)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -292,22 +287,29 @@ async def market_worker():
         except Exception:
             pass
 
-        high_payout_syms = [
-            s for s, info in STATE["assets"].items()
-            if info.get("is_open") and info.get("payout", 0) >= 92
-        ]
-
-        for sym in high_payout_syms:
+        # 1. Безпечна одноразова підписка на всі 40 пар зі списку OTC_ASSETS
+        sub_set = STATE.setdefault("subscribed", set())
+        for sym in OTC_ASSETS:
             if not api.check_connect():
                 STATE["connected"] = False
                 break
-            try:
-                await fetch_symbol_data(api, sym)
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
+            if sym not in sub_set:
+                try:
+                    await asyncio.to_thread(api.subscribe, sym, 60)
+                    sub_set.add(sym)
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    pass
 
-        await asyncio.sleep(0.3)
+        if not STATE["connected"]:
+            continue
+
+        # 2. ОДНОЧАСНЕ паралельне сканування всіх 40 пар за 1 мілісекунду!
+        await asyncio.gather(
+            *(fetch_symbol_data(api, sym) for sym in OTC_ASSETS),
+            return_exceptions=True
+        )
+        await asyncio.sleep(0.5)
 
 
 async def on_startup(app):
@@ -323,7 +325,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("BB+CCI RADAR 92% RUNNING ON PORT %s", PORT)
+    logging.info("ALL-40 RADAR ENGINE RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
