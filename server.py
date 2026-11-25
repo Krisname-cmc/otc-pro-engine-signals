@@ -53,7 +53,7 @@ def calculate_ema_and_atr(highs, lows, closes, period=12):
     if len(closes) < period + 2:
         return None, None, None
     k = 2 / (period + 1)
-    ema_vals = [closes[0]]
+    ema_vals = [closes]
     for p in closes[1:]:
         ema_vals.append(p * k + ema_vals[-1] * (1 - k))
 
