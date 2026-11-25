@@ -214,29 +214,35 @@ async def handle_status(request):
     })
 
 
-async def fetch_symbol_data(api, sym):
-    ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
-    if ticks:
-        ts, price = ticks[-1]
-        price = float(price)
+def update_all_symbols_sync(api, symbols):
+    """Оновлює тіки та M5 свічки для всіх валютних пар у межах ОДНОГО потоку (0 навантаження на пам'ять)"""
+    for sym in symbols:
+        try:
+            ticks = api.get_realtime_ticks(sym, 5)
+            if not ticks:
+                continue
+            ts, price = ticks[-1]
+            price = float(price)
 
-        t_hist = STATE["ticks"].setdefault(sym, [])
-        if not t_hist or t_hist[-1] != price:
-            t_hist.append(price)
-            if len(t_hist) > 15:
-                STATE["ticks"][sym] = t_hist[-15:]
+            t_hist = STATE["ticks"].setdefault(sym, [])
+            if not t_hist or t_hist[-1] != price:
+                t_hist.append(price)
+                if len(t_hist) > 15:
+                    STATE["ticks"][sym] = t_hist[-15:]
 
-        bucket = int(ts // 300) * 300
-        hist = STATE["candles"].setdefault(sym, [])
-        if not hist or hist[-1]["time"] < bucket:
-            hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
-            if len(hist) > 40:
-                STATE["candles"][sym] = hist[-40:]
-        else:
-            cur = hist[-1]
-            cur["high"] = max(cur["high"], price)
-            cur["low"] = min(cur["low"], price)
-            cur["close"] = price
+            bucket = int(ts // 300) * 300
+            hist = STATE["candles"].setdefault(sym, [])
+            if not hist or hist[-1]["time"] < bucket:
+                hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
+                if len(hist) > 40:
+                    STATE["candles"][sym] = hist[-40:]
+            else:
+                cur = hist[-1]
+                cur["high"] = max(cur["high"], price)
+                cur["low"] = min(cur["low"], price)
+                cur["close"] = price
+        except Exception:
+            continue
 
 
 async def market_worker():
@@ -259,7 +265,7 @@ async def market_worker():
                 if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
-                    logging.info("CONNECTED TO POCKET OPTION (ROTATING FOREX 92% RADAR)")
+                    logging.info("CONNECTED TO POCKET OPTION (LOW-THREAD 92% RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -286,8 +292,6 @@ async def market_worker():
             await asyncio.sleep(2)
             continue
 
-        # 1. Пріоритетно тримаємо підписку на поточні 92% пари + ротуємо решту по 6 пар за цикл,
-        # щоб Pocket Option не вимикав потік котирувань на фонових парах!
         high_92 = [s for s in all_otc_open if STATE["assets"][s].get("payout", 0) >= 92]
         others = [s for s in all_otc_open if s not in high_92]
 
@@ -307,13 +311,9 @@ async def market_worker():
         if not STATE["connected"]:
             continue
 
-        # 2. Зчитуємо свічки для всіх відкритих валютних пар
-        await asyncio.gather(
-            *(fetch_symbol_data(api, sym) for sym in all_otc_open),
-            return_exceptions=True
-        )
-        await asyncio.sleep(0.6)
-
+        # Зчитуємо всі валютні пари одним-єдиним потоком (без помилки can't start new thread!)
+        await asyncio.to_thread(update_all_symbols_sync, api, all_otc_open)
+        await asyncio.sleep(0.8)
 
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
