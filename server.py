@@ -41,14 +41,13 @@ def calculate_rsi(closes, period=6):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_donchian_and_wpr(highs, lows, closes, period=8):
-    if len(closes) < period + 2:
+def calculate_donchian_and_wpr(highs, lows, closes, period=3):
+    if len(closes) < period + 1:
         return None, None, None, None
-    # 1. DONCHIAN CHANNEL по попередніх закритих свічках (нерухомий тунель)
+    # Нерухомий тунель Donchian по 3 закритих свічках
     upper = max(highs[-(period + 1):-1])
     lower = min(lows[-(period + 1):-1])
 
-    # 2. WILLIAMS %R для поточної та попередньої свічки (шкала від 0 до -100)
     def wpr_at(idx_end):
         h_max = max(highs[idx_end - period:idx_end])
         l_min = min(lows[idx_end - period:idx_end])
@@ -62,12 +61,12 @@ def calculate_donchian_and_wpr(highs, lows, closes, period=8):
 
 
 def analyze_pair_m5(sym, candles, recent_ticks):
-    """M5 Нерухомий тунель: Donchian Channel (8) + Williams %R (8) + RSI (6)"""
-    if not candles or len(candles) < 10:
+    """M5 Швидкий старт (4 свічки): Donchian Channel (3) + Williams %R (3) + RSI (3)"""
+    if not candles or len(candles) < 4:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 10,
+            "needed": 4,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -75,10 +74,10 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    upper, lower, wpr_now, wpr_prev = calculate_donchian_and_wpr(highs, lows, closes, period=8)
-    rsi6 = calculate_rsi(closes, period=6)
+    upper, lower, wpr_now, wpr_prev = calculate_donchian_and_wpr(highs, lows, closes, period=3)
+    rsi3 = calculate_rsi(closes, period=3)
 
-    if upper is None or rsi6 is None:
+    if upper is None or rsi3 is None:
         return {"status": "SCAN", "price": closes[-1]}
 
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
@@ -87,8 +86,8 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     at_bottom = (lows[-1] <= lower) or (lows[-2] <= lower)
     at_top = (highs[-1] >= upper) or (highs[-2] >= upper)
 
-    wpr_buy = (wpr_prev <= -80 or wpr_now <= -80) and (wpr_now >= wpr_prev)
-    wpr_sell = (wpr_prev >= -20 or wpr_now >= -20) and (wpr_now <= wpr_prev)
+    wpr_buy = (wpr_prev <= -78 or wpr_now <= -78) and (wpr_now >= wpr_prev)
+    wpr_sell = (wpr_prev >= -22 or wpr_now >= -22) and (wpr_now <= wpr_prev)
 
     sec_in_5m = int(time.time()) % 300
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
@@ -102,7 +101,7 @@ def analyze_pair_m5(sym, candles, recent_ticks):
             return "10m"
         return "15m"
 
-    if at_bottom and wpr_buy and (rsi6 <= 46) and tick_up:
+    if at_bottom and wpr_buy and (rsi3 <= 45) and tick_up:
         rec_exp = pick_exp(min(wpr_now, wpr_prev), True, sec_in_5m)
         sig_data = {
             "direction": "BUY",
@@ -115,7 +114,7 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    elif at_top and wpr_sell and (rsi6 >= 54) and tick_down:
+    elif at_top and wpr_sell and (rsi3 >= 55) and tick_down:
         rec_exp = pick_exp(max(wpr_now, wpr_prev), False, sec_in_5m)
         sig_data = {
             "direction": "SELL",
@@ -131,11 +130,10 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     return {
         "status": "READY",
         "price": closes[-1],
-        "rsi": round(rsi6, 1),
+        "rsi": round(rsi3, 1),
         "cci": round(wpr_now, 0),
         "cur_bucket": cur_bucket
     }
-
 
 FIAT_AND_METALS = {
     "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
@@ -242,6 +240,7 @@ async def fetch_symbol_data(api, sym):
 
 
 async def market_worker():
+    batch_idx = 0
     while True:
         api = STATE["api"]
         if api is None or not STATE["connected"]:
@@ -260,8 +259,7 @@ async def market_worker():
                 if ok:
                     STATE["api"] = new_api
                     STATE["connected"] = True
-                    STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (ALL OTC 92% ENGINE)")
+                    logging.info("CONNECTED TO POCKET OPTION (ROTATING FOREX 92% RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -283,30 +281,38 @@ async def market_worker():
         except Exception:
             pass
 
-        all_otc_open = [s for s, info in STATE["assets"].items() if info.get("is_open")]
+        all_otc_open = sorted([s for s, info in STATE["assets"].items() if info.get("is_open")])
+        if not all_otc_open:
+            await asyncio.sleep(2)
+            continue
 
-        sub_set = STATE.setdefault("subscribed", set())
-        for sym in all_otc_open:
+        # 1. Пріоритетно тримаємо підписку на поточні 92% пари + ротуємо решту по 6 пар за цикл,
+        # щоб Pocket Option не вимикав потік котирувань на фонових парах!
+        high_92 = [s for s in all_otc_open if STATE["assets"][s].get("payout", 0) >= 92]
+        others = [s for s in all_otc_open if s not in high_92]
+
+        batch = others[batch_idx:batch_idx + 6]
+        batch_idx = 0 if (batch_idx + 6) >= len(others) else (batch_idx + 6)
+
+        for sym in (high_92 + batch):
             if not api.check_connect():
                 STATE["connected"] = False
                 break
-            if sym not in sub_set:
-                try:
-                    await asyncio.to_thread(api.subscribe, sym, 60)
-                    sub_set.add(sym)
-                    await asyncio.sleep(0.05)
-                except Exception:
-                    pass
+            try:
+                await asyncio.to_thread(api.subscribe, sym, 60)
+                await asyncio.sleep(0.05)
+            except Exception:
+                pass
 
         if not STATE["connected"]:
             continue
 
-        if all_otc_open:
-            await asyncio.gather(
-                *(fetch_symbol_data(api, sym) for sym in all_otc_open),
-                return_exceptions=True
-            )
-        await asyncio.sleep(0.5)
+        # 2. Зчитуємо свічки для всіх відкритих валютних пар
+        await asyncio.gather(
+            *(fetch_symbol_data(api, sym) for sym in all_otc_open),
+            return_exceptions=True
+        )
+        await asyncio.sleep(0.6)
 
 
 async def on_startup(app):
