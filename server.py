@@ -15,6 +15,14 @@ PO_SSID = os.getenv("PO_SSID", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
+FIAT_AND_METALS = {
+    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "BRL", "CLP", "CNH", "COP", "IDR", "INR", "MXN", "PHP",
+    "THB", "VND", "SGD", "HKD", "ZAR", "TRY", "PLN", "SEK",
+    "NOK", "DKK", "HUF", "CZK", "ILS", "KRW", "MYR", "TWD",
+    "XAU", "XAG", "XPT", "XPD"
+}
+
 STATE = {
     "api": None,
     "assets": {},
@@ -25,7 +33,7 @@ STATE = {
 }
 
 
-def calculate_rsi(closes, period=6):
+def calculate_rsi(closes, period=7):
     if len(closes) < period + 1:
         return None
     gains, losses = [], []
@@ -41,68 +49,95 @@ def calculate_rsi(closes, period=6):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_donchian_and_wpr(highs, lows, closes, period=3):
-    if len(closes) < period + 1:
-        return None, None, None, None
-    # Нерухомий тунель Donchian по 3 закритих свічках
-    upper = max(highs[-(period + 1):-1])
-    lower = min(lows[-(period + 1):-1])
+def calculate_ema_and_atr(highs, lows, closes, period=12):
+    if len(closes) < period + 2:
+        return None, None, None
+    k = 2 / (period + 1)
+    ema_vals = [closes[0]]
+    for p in closes[1:]:
+        ema_vals.append(p * k + ema_vals[-1] * (1 - k))
 
-    def wpr_at(idx_end):
-        h_max = max(highs[idx_end - period:idx_end])
-        l_min = min(lows[idx_end - period:idx_end])
-        if h_max == l_min:
-            return -50.0
-        return ((h_max - closes[idx_end - 1]) / (h_max - l_min)) * -100.0
+    trs = []
+    for i in range(-period, 0):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        trs.append(tr)
+    atr_val = statistics.mean(trs)
+    return ema_vals[-1], ema_vals[-3], atr_val
 
-    wpr_now = wpr_at(len(closes))
-    wpr_prev = wpr_at(len(closes) - 1)
-    return upper, lower, wpr_now, wpr_prev
+
+def calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2):
+    if len(closes) < k_period + smooth_k + smooth_d:
+        return None, None, None
+    raw_k = []
+    for i in range(k_period - 1, len(closes)):
+        l_min = min(lows[i - k_period + 1:i + 1])
+        h_max = max(highs[i - k_period + 1:i + 1])
+        raw_k.append(50.0 if h_max == l_min else ((closes[i] - l_min) / (h_max - l_min)) * 100.0)
+
+    k_line = [statistics.mean(raw_k[i - smooth_k + 1:i + 1]) for i in range(smooth_k - 1, len(raw_k))]
+    if len(k_line) < smooth_d + 1:
+        return None, None, None
+    d_now = statistics.mean(k_line[-smooth_d:])
+    return k_line[-1], k_line[-2], d_now
 
 
-def analyze_pair_m5(sym, candles, recent_ticks):
-    """M5 Швидкий старт (4 свічки): Donchian Channel (3) + Williams %R (3) + RSI (3)"""
-    if not candles or len(candles) < 4:
+def analyze_pair_m1(sym, candles, recent_ticks):
+    """M1 Вхід по тренду на відкаті: EMA(12) + ATR(12) + Stochastic(8,2,2) + RSI(7) -> 1m / 2m / 5m"""
+    if not candles or len(candles) < 12:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 4,
+            "needed": 12,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
+    opens = [float(x["open"]) for x in candles]
     highs = [float(x["high"]) for x in candles]
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    upper, lower, wpr_now, wpr_prev = calculate_donchian_and_wpr(highs, lows, closes, period=3)
-    rsi3 = calculate_rsi(closes, period=3)
+    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=12)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2)
+    rsi7 = calculate_rsi(closes, period=7)
 
-    if upper is None or rsi3 is None:
+    if ema_now is None or k_now is None or rsi7 is None or atr_val <= 0:
         return {"status": "SCAN", "price": closes[-1]}
+
+    cur_bucket = candles[-1]["time"]
+
+    # 1. Фільтр волатильності ATR: не ліземо в стоячий флет
+    last_range = highs[-1] - lows[-1]
+    if last_range < atr_val * 0.35:
+        return {"status": "READY", "price": closes[-1], "rsi": round(rsi7, 1), "cci": round(k_now, 0), "cur_bucket": cur_bucket}
+
+    # 2. Чистий тренд по EMA(12)
+    uptrend = (closes[-1] > ema_now) and (ema_now > ema_prev)
+    downtrend = (closes[-1] < ema_now) and (ema_now < ema_prev)
+
+    # 3. Відкат у бік тренду по Stochastic
+    pullback_buy = (k_prev <= 42) and (k_now > k_prev) and (k_now > d_now)
+    pullback_sell = (k_prev >= 58) and (k_now < k_prev) and (k_now < d_now)
 
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
-    at_bottom = (lows[-1] <= lower) or (lows[-2] <= lower)
-    at_top = (highs[-1] >= upper) or (highs[-2] >= upper)
-
-    wpr_buy = (wpr_prev <= -78 or wpr_now <= -78) and (wpr_now >= wpr_prev)
-    wpr_sell = (wpr_prev >= -22 or wpr_now >= -22) and (wpr_now <= wpr_prev)
-
-    sec_in_5m = int(time.time()) % 300
+    sec_in_1m = int(time.time()) % 60
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
-    cur_bucket = candles[-1]["time"]
 
-    def pick_exp(wpr_val, is_buy, sec_val):
-        extreme = abs(-100 - wpr_val) if is_buy else abs(wpr_val)
-        if extreme <= 8:
-            return "5m"
-        if sec_val <= 150:
-            return "10m"
-        return "15m"
+    def pick_exp_m1(sec_val, rsi_val, is_buy):
+        impulse = (rsi_val - 50) if is_buy else (50 - rsi_val)
+        if sec_val <= 20 and impulse >= 8:
+            return "1m"
+        if sec_val <= 42:
+            return "2m"
+        return "5m"
 
-    if at_bottom and wpr_buy and (rsi3 <= 45) and tick_up:
-        rec_exp = pick_exp(min(wpr_now, wpr_prev), True, sec_in_5m)
+    if uptrend and pullback_buy and (50 <= rsi7 <= 68) and (closes[-1] > opens[-1]) and tick_up:
+        rec_exp = pick_exp_m1(sec_in_1m, rsi7, True)
         sig_data = {
             "direction": "BUY",
             "rec_exp": rec_exp,
@@ -114,8 +149,8 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    elif at_top and wpr_sell and (rsi3 >= 55) and tick_down:
-        rec_exp = pick_exp(max(wpr_now, wpr_prev), False, sec_in_5m)
+    elif downtrend and pullback_sell and (32 <= rsi7 <= 50) and (closes[-1] < opens[-1]) and tick_down:
+        rec_exp = pick_exp_m1(sec_in_1m, rsi7, False)
         sig_data = {
             "direction": "SELL",
             "rec_exp": rec_exp,
@@ -130,18 +165,10 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     return {
         "status": "READY",
         "price": closes[-1],
-        "rsi": round(rsi3, 1),
-        "cci": round(wpr_now, 0),
+        "rsi": round(rsi7, 1),
+        "cci": round(k_now, 0),
         "cur_bucket": cur_bucket
     }
-
-FIAT_AND_METALS = {
-    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
-    "BRL", "CLP", "CNH", "COP", "IDR", "INR", "MXN", "PHP",
-    "THB", "VND", "SGD", "HKD", "ZAR", "TRY", "PLN", "SEK",
-    "NOK", "DKK", "HUF", "CZK", "ILS", "KRW", "MYR", "TWD",
-    "XAU", "XAG", "XPT", "XPD"
-}
 
 
 def parse_assets(raw_assets):
@@ -152,9 +179,7 @@ def parse_assets(raw_assets):
         s_str = str(sym)
         if not (isinstance(item, dict) and s_str.lower().endswith("_otc")):
             continue
-
-        base_code = s_str[:-4].upper()  # Наприклад, "EURUSD" або "XAUUSD"
-        # Пропускаємо тільки 6-літерні пари, де обидві частини — реальні валюти або метали (без акцій та крипти)
+        base_code = s_str[:-4].upper()
         if len(base_code) == 6 and base_code[:3] in FIAT_AND_METALS and base_code[3:] in FIAT_AND_METALS:
             payout = item.get("payout")
             is_avail = item.get("is_available", True)
@@ -184,7 +209,7 @@ async def handle_status(request):
         if info.get("is_open") and info.get("payout", 0) >= 92:
             c_list = STATE["candles"].get(sym, [])
             t_list = STATE["ticks"].get(sym, [])
-            res = analyze_pair_m5(sym, c_list, t_list)
+            res = analyze_pair_m1(sym, c_list, t_list)
             last_sig = STATE["last_signals"].get(sym)
             is_fresh = bool(last_sig and res.get("cur_bucket") == last_sig.get("bucket"))
             rows.append({
@@ -215,7 +240,7 @@ async def handle_status(request):
 
 
 def update_all_symbols_sync(api, symbols):
-    """Оновлює тіки та M5 свічки для всіх валютних пар у межах ОДНОГО потоку (0 навантаження на пам'ять)"""
+    """Оновлює тіки та M1 свічки (60 сек) для всіх пар в одному потоці"""
     for sym in symbols:
         try:
             ticks = api.get_realtime_ticks(sym, 5)
@@ -230,12 +255,12 @@ def update_all_symbols_sync(api, symbols):
                 if len(t_hist) > 15:
                     STATE["ticks"][sym] = t_hist[-15:]
 
-            bucket = int(ts // 300) * 300
+            bucket = int(ts // 60) * 60
             hist = STATE["candles"].setdefault(sym, [])
             if not hist or hist[-1]["time"] < bucket:
                 hist.append({"time": bucket, "open": price, "high": price, "low": price, "close": price})
-                if len(hist) > 40:
-                    STATE["candles"][sym] = hist[-40:]
+                if len(hist) > 50:
+                    STATE["candles"][sym] = hist[-50:]
             else:
                 cur = hist[-1]
                 cur["high"] = max(cur["high"], price)
@@ -265,7 +290,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (88%+ FOREX RADAR)")
+                    logging.info("CONNECTED TO POCKET OPTION (M1 TREND 92% RADAR)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -287,7 +312,6 @@ async def market_worker():
         except Exception:
             pass
 
-        # Скануємо ТІЛЬКИ відкриті валютні пари з виплатою >= 88% (захист від спам-фільтра Pocket Option)
         top_88_syms = sorted([
             s for s, info in STATE["assets"].items()
             if info.get("is_open") and info.get("payout", 0) >= 88
@@ -297,7 +321,6 @@ async def market_worker():
             await asyncio.sleep(2)
             continue
 
-        # 1. Одноразова легка підписка на пари 88%+ (без повторного спаму в кожному циклі!)
         sub_set = STATE.setdefault("subscribed", set())
         for sym in top_88_syms:
             if not api.check_connect():
@@ -307,16 +330,16 @@ async def market_worker():
                 try:
                     await asyncio.to_thread(api.subscribe, sym, 60)
                     sub_set.add(sym)
-                    await asyncio.sleep(0.15)
+                    await asyncio.sleep(0.12)
                 except Exception:
                     pass
 
         if not STATE["connected"]:
             continue
 
-        # 2. Зчитуємо свічки лише для пар 88%+ одним легким потоком
         await asyncio.to_thread(update_all_symbols_sync, api, top_88_syms)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.8)
+
 
 async def on_startup(app):
     app["worker"] = asyncio.create_task(market_worker())
@@ -331,7 +354,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("ALL-OTC 92% ENGINE RUNNING ON PORT %s", PORT)
+    logging.info("M1 RADAR 92% ENGINE RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
