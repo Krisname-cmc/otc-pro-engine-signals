@@ -55,17 +55,15 @@ def calculate_rsi(closes, period=6):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.9):
+def calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.65):
     if len(closes) < period + 1:
         return None, None, None, None
-    # Bollinger Bands
     window = closes[-period:]
     mid = statistics.mean(window)
     std = statistics.pstdev(window)
     upper = mid + mult * std
     lower = mid - mult * std
 
-    # CCI (Commodity Channel Index) для поточної та попередньої свічки
     def cci_at(idx_end):
         tp_list = [(highs[i] + lows[i] + closes[i]) / 3.0 for i in range(idx_end - period, idx_end)]
         tp_mean = statistics.mean(tp_list)
@@ -80,7 +78,7 @@ def calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.9):
 
 
 def analyze_pair_m5(sym, candles, recent_ticks):
-    """M5 Відбій від каналу: Bollinger Bands (8, 1.9) + CCI (8) + RSI (6) + тінь розвороту"""
+    """M5 Збалансований відбій: Bollinger Bands (8, 1.65) + CCI (8) + RSI (6)"""
     if not candles or len(candles) < 8:
         return {
             "status": "WARMING",
@@ -89,47 +87,40 @@ def analyze_pair_m5(sym, candles, recent_ticks):
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
-    opens = [float(x["open"]) for x in candles]
     highs = [float(x["high"]) for x in candles]
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    upper, lower, cci_now, cci_prev = calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.9)
+    upper, lower, cci_now, cci_prev = calculate_bb_and_cci(highs, lows, closes, period=8, mult=1.65)
     rsi6 = calculate_rsi(closes, period=6)
 
     if upper is None or rsi6 is None:
         return {"status": "SCAN", "price": closes[-1]}
 
-    candle_range = max(highs[-1] - lows[-1], 1e-9)
-    lower_wick_ratio = (min(opens[-1], closes[-1]) - lows[-1]) / candle_range
-    upper_wick_ratio = (highs[-1] - max(opens[-1], closes[-1])) / candle_range
-
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
-    # Умова BUY: ціна торкнулася/пробила нижню смугу BB, CCI виходить із перепроданості (<-90 -> вгору), RSI < 40, є нижня тінь або зелений відскок
+    # Перевірка виходу ціни за межі каналу Боллінджера (поточна або попередня свічка)
     touched_lower = (lows[-1] <= lower) or (closes[-2] <= lower)
-    cci_buy = (cci_prev <= -90) and (cci_now > cci_prev)
-    bounce_buy = (closes[-1] > opens[-1]) or (lower_wick_ratio >= 0.32)
-
-    # Умова SELL: ціна торкнулася/пробила верхню смугу BB, CCI виходить із перекупленості (>+90 -> вниз), RSI > 60, є верхня тінь або червоний відскок
     touched_upper = (highs[-1] >= upper) or (closes[-2] >= upper)
-    cci_sell = (cci_prev >= 90) and (cci_now < cci_prev)
-    bounce_sell = (closes[-1] < opens[-1]) or (upper_wick_ratio >= 0.32)
+
+    # CCI показує перегрів (< -80 або > +80) і починає розвертатися всередину каналу
+    cci_buy = (cci_now <= -80 or cci_prev <= -80) and (cci_now >= cci_prev - 5)
+    cci_sell = (cci_now >= 80 or cci_prev >= 80) and (cci_now <= cci_prev + 5)
 
     sec_in_5m = int(time.time()) % 300
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
     cur_bucket = candles[-1]["time"]
 
     def pick_exp(cci_abs, sec_val):
-        if cci_abs >= 145:
+        if cci_abs >= 130:
             return "5m"
         if sec_val <= 150:
             return "10m"
         return "15m"
 
-    if touched_lower and cci_buy and (rsi6 <= 42) and bounce_buy and tick_up:
-        rec_exp = pick_exp(abs(cci_prev), sec_in_5m)
+    if touched_lower and cci_buy and (rsi6 <= 48) and tick_up:
+        rec_exp = pick_exp(max(abs(cci_now), abs(cci_prev)), sec_in_5m)
         sig_data = {
             "direction": "BUY",
             "rec_exp": rec_exp,
@@ -141,8 +132,8 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    elif touched_upper and cci_sell and (rsi6 >= 58) and bounce_sell and tick_down:
-        rec_exp = pick_exp(abs(cci_prev), sec_in_5m)
+    elif touched_upper and cci_sell and (rsi6 >= 52) and tick_down:
+        rec_exp = pick_exp(max(abs(cci_now), abs(cci_prev)), sec_in_5m)
         sig_data = {
             "direction": "SELL",
             "rec_exp": rec_exp,
@@ -161,7 +152,6 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         "cci": round(cci_now, 0),
         "cur_bucket": cur_bucket
     }
-
 
 def parse_assets(raw_assets):
     result = {}
