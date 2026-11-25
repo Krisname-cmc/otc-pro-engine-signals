@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import math
 import os
 import statistics
 import time
@@ -15,19 +14,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 PO_SSID = os.getenv("PO_SSID", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
-
-OTC_ASSETS = [
-    "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "AUDUSD_otc", "USDCAD_otc",
-    "USDCHF_otc", "EURJPY_otc", "GBPJPY_otc", "AUDCAD_otc", "EURGBP_otc",
-    "NZDUSD_otc", "EURCHF_otc", "EURAUD_otc", "EURNZD_otc", "GBPAUD_otc",
-    "GBPCAD_otc", "GBPCHF_otc", "AUDJPY_otc", "CADJPY_otc", "CHFJPY_otc",
-    "AUDNZD_otc", "CADCHF_otc", "NZDCAD_otc", "NZDCHF_otc", "NZDJPY_otc",
-    "USDBRL_otc", "USDCLP_otc", "USDCNH_otc", "USDCOP_otc", "USDIDR_otc",
-    "USDINR_otc", "USDMXN_otc", "USDPHP_otc", "USDTHB_otc", "USDVND_otc",
-    "XAUUSD_otc", "XAGUSD_otc", "UKBrent_otc", "USCrude_otc", "BTCUSD_otc"
-]
-
-OTC_ASSET_LOOKUP = {s.lower() for s in OTC_ASSETS}
 
 STATE = {
     "api": None,
@@ -58,7 +44,7 @@ def calculate_rsi(closes, period=6):
 def calculate_donchian_and_wpr(highs, lows, closes, period=8):
     if len(closes) < period + 2:
         return None, None, None, None
-    # 1. DONCHIAN CHANNEL по попередніх закритих свічках (нерухомий тунель!)
+    # 1. DONCHIAN CHANNEL по попередніх закритих свічках (нерухомий тунель)
     upper = max(highs[-(period + 1):-1])
     lower = min(lows[-(period + 1):-1])
 
@@ -98,11 +84,9 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
     tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
 
-    # Ціна вперлася або пробила нерухому стіну каналу Дончіана
     at_bottom = (lows[-1] <= lower) or (lows[-2] <= lower)
     at_top = (highs[-1] >= upper) or (highs[-2] >= upper)
 
-    # Williams %R підтверджує перегрів біля стіни і початок відскоку всередину тунелю
     wpr_buy = (wpr_prev <= -80 or wpr_now <= -80) and (wpr_now >= wpr_prev)
     wpr_sell = (wpr_prev >= -20 or wpr_now >= -20) and (wpr_now <= wpr_prev)
 
@@ -118,7 +102,6 @@ def analyze_pair_m5(sym, candles, recent_ticks):
             return "10m"
         return "15m"
 
-    # BUY: дотик/пробій нижньої межі Donchian + Williams %R <= -80 + RSI <= 46 + тік вгору
     if at_bottom and wpr_buy and (rsi6 <= 46) and tick_up:
         rec_exp = pick_exp(min(wpr_now, wpr_prev), True, sec_in_5m)
         sig_data = {
@@ -132,7 +115,6 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    # SELL: дотик/пробій верхньої межі Donchian + Williams %R >= -20 + RSI >= 54 + тік вниз
     elif at_top and wpr_sell and (rsi6 >= 54) and tick_down:
         rec_exp = pick_exp(max(wpr_now, wpr_prev), False, sec_in_5m)
         sig_data = {
@@ -154,12 +136,14 @@ def analyze_pair_m5(sym, candles, recent_ticks):
         "cur_bucket": cur_bucket
     }
 
+
 def parse_assets(raw_assets):
     result = {}
     if not isinstance(raw_assets, dict):
         return result
     for sym, item in raw_assets.items():
-        if isinstance(item, dict) and str(sym).lower() in OTC_ASSET_LOOKUP:
+        # Беремо АБСОЛЮТНО ВСІ OTC-активи з каталогу Pocket Option
+        if isinstance(item, dict) and str(sym).lower().endswith("_otc"):
             payout = item.get("payout")
             is_avail = item.get("is_available", True)
             try:
@@ -199,7 +183,6 @@ async def handle_status(request):
                 **res
             })
 
-    # Сортуємо: спочатку свіжі імпульси, потім пари зі збереженим імпульсом (за часом), потім ті, що скануються
     def sort_key(r):
         ls = r.get("last_signal")
         if r.get("is_fresh"):
@@ -220,7 +203,6 @@ async def handle_status(request):
 
 
 async def fetch_symbol_data(api, sym):
-    """Миттєве оновлення M5 свічок для кожної з 40 пар"""
     ticks = await asyncio.to_thread(api.get_realtime_ticks, sym, 5)
     if ticks:
         ts, price = ticks[-1]
@@ -265,7 +247,7 @@ async def market_worker():
                     STATE["api"] = new_api
                     STATE["connected"] = True
                     STATE["subscribed"] = set()
-                    logging.info("CONNECTED TO POCKET OPTION (ALL 40 ASSETS ENGINE)")
+                    logging.info("CONNECTED TO POCKET OPTION (ALL OTC 92% ENGINE)")
                 else:
                     STATE["connected"] = False
                     logging.error("PO AUTH ERROR: %s", err)
@@ -287,9 +269,10 @@ async def market_worker():
         except Exception:
             pass
 
-        # 1. Безпечна одноразова підписка на всі 40 пар зі списку OTC_ASSETS
+        all_otc_open = [s for s, info in STATE["assets"].items() if info.get("is_open")]
+
         sub_set = STATE.setdefault("subscribed", set())
-        for sym in OTC_ASSETS:
+        for sym in all_otc_open:
             if not api.check_connect():
                 STATE["connected"] = False
                 break
@@ -297,18 +280,18 @@ async def market_worker():
                 try:
                     await asyncio.to_thread(api.subscribe, sym, 60)
                     sub_set.add(sym)
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
                 except Exception:
                     pass
 
         if not STATE["connected"]:
             continue
 
-        # 2. ОДНОЧАСНЕ паралельне сканування всіх 40 пар за 1 мілісекунду!
-        await asyncio.gather(
-            *(fetch_symbol_data(api, sym) for sym in OTC_ASSETS),
-            return_exceptions=True
-        )
+        if all_otc_open:
+            await asyncio.gather(
+                *(fetch_symbol_data(api, sym) for sym in all_otc_open),
+                return_exceptions=True
+            )
         await asyncio.sleep(0.5)
 
 
@@ -325,7 +308,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logging.info("ALL-40 RADAR ENGINE RUNNING ON PORT %s", PORT)
+    logging.info("ALL-OTC 92% ENGINE RUNNING ON PORT %s", PORT)
     while True:
         await asyncio.sleep(3600)
 
