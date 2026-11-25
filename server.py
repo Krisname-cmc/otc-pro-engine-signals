@@ -137,20 +137,34 @@ def analyze_pair_m5(sym, candles, recent_ticks):
     }
 
 
+FIAT_AND_METALS = {
+    "EUR", "USD", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "BRL", "CLP", "CNH", "COP", "IDR", "INR", "MXN", "PHP",
+    "THB", "VND", "SGD", "HKD", "ZAR", "TRY", "PLN", "SEK",
+    "NOK", "DKK", "HUF", "CZK", "ILS", "KRW", "MYR", "TWD",
+    "XAU", "XAG", "XPT", "XPD"
+}
+
+
 def parse_assets(raw_assets):
     result = {}
     if not isinstance(raw_assets, dict):
         return result
     for sym, item in raw_assets.items():
-        # Беремо АБСОЛЮТНО ВСІ OTC-активи з каталогу Pocket Option
-        if isinstance(item, dict) and str(sym).lower().endswith("_otc"):
+        s_str = str(sym)
+        if not (isinstance(item, dict) and s_str.lower().endswith("_otc")):
+            continue
+
+        base_code = s_str[:-4].upper()  # Наприклад, "EURUSD" або "XAUUSD"
+        # Пропускаємо тільки 6-літерні пари, де обидві частини — реальні валюти або метали (без акцій та крипти)
+        if len(base_code) == 6 and base_code[:3] in FIAT_AND_METALS and base_code[3:] in FIAT_AND_METALS:
             payout = item.get("payout")
             is_avail = item.get("is_available", True)
             try:
                 p_val = float(payout) if payout is not None else 0
             except Exception:
                 p_val = 0
-            result[str(sym)] = {"payout": p_val, "is_open": bool(is_avail)}
+            result[s_str] = {"payout": p_val, "is_open": bool(is_avail)}
     return result
 
 
