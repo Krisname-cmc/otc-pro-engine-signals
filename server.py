@@ -167,7 +167,7 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     return {
         "status": "READY",
         "price": closes[-1],
-        "rsi": round(rsi7, 1),
+        "rsi": round(rsi6, 1),
         "cci": round(k_now, 0),
         "cur_bucket": cur_bucket
     }
