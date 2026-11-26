@@ -86,12 +86,12 @@ def calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2
 
 
 def analyze_pair_m1(sym, candles, recent_ticks):
-    """M1 Вхід по тренду на відкаті: EMA(12) + ATR(12) + Stochastic(8,2,2) + RSI(7) -> 1m / 2m / 5m"""
-    if not candles or len(candles) < 17:
+    """M1 Активний тренд + відкат: EMA(12) + ATR(10) + Stochastic(6,2,2) + RSI(6) -> 1m / 2m / 5m"""
+    if not candles or len(candles) < 14:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 17,
+            "needed": 14,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -100,7 +100,7 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=15)
+    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=12)
     k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, k_period=6, smooth_k=2, smooth_d=2)
     rsi6 = calculate_rsi(closes, period=6)
 
@@ -109,37 +109,34 @@ def analyze_pair_m1(sym, candles, recent_ticks):
 
     cur_bucket = candles[-1]["time"]
 
-    # Фільтр стоячого ринку ATR
-    if (highs[-1] - lows[-1]) < atr_val * 0.2:
+    # Відсікаємо лише повністю мертвий ринок
+    if (highs[-1] - lows[-1]) < atr_val * 0.15:
         return {"status": "READY", "price": closes[-1], "rsi": round(rsi6, 1), "cci": round(k_now, 0), "cur_bucket": cur_bucket}
 
-    # Тренд визначаємо по плавній EMA(15), щоб короткий відкат не перебивав напрямок
-    uptrend = (ema_now > ema_prev) and (closes[-1] >= ema_now * 0.9995)
-    downtrend = (ema_now < ema_prev) and (closes[-1] <= ema_now * 1.0005)
+    # Тренд по EMA(12)
+    uptrend = ema_now > ema_prev
+    downtrend = ema_now < ema_prev
 
-    pullback_buy = (k_prev <= 48) and (k_now > k_prev)
-    pullback_sell = (k_prev >= 52) and (k_now < k_prev)
+    # Розворот по Stochastic після відкату (або вихід із перепроданості/перекупленості)
+    pullback_buy = (k_prev <= 50) and (k_now > k_prev)
+    pullback_sell = (k_prev >= 50) and (k_now < k_prev)
 
-    # 3. Відкат у бік тренду по Stochastic
-    pullback_buy = (k_prev <= 42) and (k_now > k_prev) and (k_now > d_now)
-    pullback_sell = (k_prev >= 58) and (k_now < k_prev) and (k_now < d_now)
-
-    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
-    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
+    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] >= recent_ticks[-2]
+    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] <= recent_ticks[-2]
 
     sec_in_1m = int(time.time()) % 60
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
 
     def pick_exp_m1(sec_val, rsi_val, is_buy):
         impulse = (rsi_val - 50) if is_buy else (50 - rsi_val)
-        if sec_val <= 20 and impulse >= 8:
+        if sec_val <= 22 and impulse >= 5:
             return "1m"
-        if sec_val <= 42:
+        if sec_val <= 45:
             return "2m"
         return "5m"
 
-    if uptrend and pullback_buy and (50 <= rsi7 <= 68) and (closes[-1] > opens[-1]) and tick_up:
-        rec_exp = pick_exp_m1(sec_in_1m, rsi7, True)
+    if uptrend and pullback_buy and (42 <= rsi6 <= 74) and (closes[-1] >= opens[-1]) and tick_up:
+        rec_exp = pick_exp_m1(sec_in_1m, rsi6, True)
         sig_data = {
             "direction": "BUY",
             "rec_exp": rec_exp,
@@ -151,8 +148,8 @@ def analyze_pair_m1(sym, candles, recent_ticks):
         if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
             STATE["last_signals"][sym] = sig_data
 
-    elif downtrend and pullback_sell and (32 <= rsi7 <= 50) and (closes[-1] < opens[-1]) and tick_down:
-        rec_exp = pick_exp_m1(sec_in_1m, rsi7, False)
+    elif downtrend and pullback_sell and (26 <= rsi6 <= 58) and (closes[-1] <= opens[-1]) and tick_down:
+        rec_exp = pick_exp_m1(sec_in_1m, rsi6, False)
         sig_data = {
             "direction": "SELL",
             "rec_exp": rec_exp,
@@ -171,7 +168,6 @@ def analyze_pair_m1(sym, candles, recent_ticks):
         "cci": round(k_now, 0),
         "cur_bucket": cur_bucket
     }
-
 
 def parse_assets(raw_assets):
     result = {}
