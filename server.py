@@ -87,11 +87,11 @@ def calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2
 
 def analyze_pair_m1(sym, candles, recent_ticks):
     """M1 Вхід по тренду на відкаті: EMA(12) + ATR(12) + Stochastic(8,2,2) + RSI(7) -> 1m / 2m / 5m"""
-    if not candles or len(candles) < 12:
+    if not candles or len(candles) < 17:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 12,
+            "needed": 17,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -100,23 +100,25 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=12)
-    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2)
-    rsi7 = calculate_rsi(closes, period=7)
+    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=15)
+    k_now, k_prev, d_now = calculate_stochastic(highs, lows, closes, k_period=6, smooth_k=2, smooth_d=2)
+    rsi6 = calculate_rsi(closes, period=6)
 
-    if ema_now is None or k_now is None or rsi7 is None or atr_val <= 0:
+    if ema_now is None or k_now is None or rsi6 is None or atr_val <= 0:
         return {"status": "SCAN", "price": closes[-1]}
 
     cur_bucket = candles[-1]["time"]
 
-    # 1. Фільтр волатильності ATR: не ліземо в стоячий флет
-    last_range = highs[-1] - lows[-1]
-    if last_range < atr_val * 0.35:
-        return {"status": "READY", "price": closes[-1], "rsi": round(rsi7, 1), "cci": round(k_now, 0), "cur_bucket": cur_bucket}
+    # Фільтр стоячого ринку ATR
+    if (highs[-1] - lows[-1]) < atr_val * 0.2:
+        return {"status": "READY", "price": closes[-1], "rsi": round(rsi6, 1), "cci": round(k_now, 0), "cur_bucket": cur_bucket}
 
-    # 2. Чистий тренд по EMA(12)
-    uptrend = (closes[-1] > ema_now) and (ema_now > ema_prev)
-    downtrend = (closes[-1] < ema_now) and (ema_now < ema_prev)
+    # Тренд визначаємо по плавній EMA(15), щоб короткий відкат не перебивав напрямок
+    uptrend = (ema_now > ema_prev) and (closes[-1] >= ema_now * 0.9995)
+    downtrend = (ema_now < ema_prev) and (closes[-1] <= ema_now * 1.0005)
+
+    pullback_buy = (k_prev <= 48) and (k_now > k_prev)
+    pullback_sell = (k_prev >= 52) and (k_now < k_prev)
 
     # 3. Відкат у бік тренду по Stochastic
     pullback_buy = (k_prev <= 42) and (k_now > k_prev) and (k_now > d_now)
