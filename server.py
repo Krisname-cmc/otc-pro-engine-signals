@@ -108,12 +108,12 @@ def calculate_macd_hist(closes, fast=5, slow=13, signal=4):
 
 
 def analyze_pair_m1(sym, candles, recent_ticks):
-    """M1 Тренд + Імпульс: EMA(10) + MACD(5,13,4) + RSI(6) -> 1m / 2m / 5m"""
-    if not candles or len(candles) < 18:
+    """M1 Відбій від виснаження на OTC: RSI(4) Extreme + Тінь розвороту + Старт свічки -> 1m / 2m / 5m"""
+    if not candles or len(candles) < 12:
         return {
             "status": "WARMING",
             "collected": len(candles),
-            "needed": 18,
+            "needed": 12,
             "price": round(recent_ticks[-1], 5) if recent_ticks else None
         }
 
@@ -122,40 +122,55 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     lows = [float(x["low"]) for x in candles]
     closes = [float(x["close"]) for x in candles]
 
-    ema_now, ema_prev, _ = calculate_ema_and_atr(highs, lows, closes, period=10)
-    hist_now, hist_prev = calculate_macd_hist(closes, fast=5, slow=13, signal=4)
+    ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=10)
+    rsi4 = calculate_rsi(closes, period=4)
     rsi6 = calculate_rsi(closes, period=6)
 
-    if ema_now is None or hist_now is None or rsi6 is None:
+    if ema_now is None or rsi4 is None or rsi6 is None or atr_val <= 0:
         return {"status": "SCAN", "price": closes[-1]}
 
     cur_bucket = candles[-1]["time"]
-
-    # 1. Напрямок тренду по нашій базовій EMA(10)
-    uptrend = closes[-1] > ema_now and ema_now >= ema_prev
-    downtrend = closes[-1] < ema_now and ema_now <= ema_prev
-
-    # 2. Підтвердження сили імпульсу по MACD (гістограма в зеленій/червоній зоні й прискорюється)
-    macd_buy = (hist_now > 0) and (hist_now > hist_prev)
-    macd_sell = (hist_now < 0) and (hist_now < hist_prev)
-
-    # 3. Базовий фільтр RSI(6) + колір свічки
-    buy_cond = uptrend and macd_buy and (50 <= rsi6 <= 72) and (closes[-1] > opens[-1])
-    sell_cond = downtrend and macd_sell and (28 <= rsi6 <= 50) and (closes[-1] < opens[-1])
-
     sec_in_1m = int(time.time()) % 60
+
+    # 1. Заходимо ТІЛЬКИ у перші 18 секунд нової свічки, щоб зловити весь відскок з самого початку
+    if sec_in_1m > 18:
+        return {
+            "status": "READY",
+            "price": closes[-1],
+            "rsi": round(rsi4, 1),
+            "cci": round(rsi6, 1),
+            "cur_bucket": cur_bucket
+        }
+
+    # 2. Перевіряємо тінь відскоку на щойно закритій свічці (candles[-2])
+    prev_range = max(highs[-2] - lows[-2], 1e-9)
+    prev_lower_wick = (min(opens[-2], closes[-2]) - lows[-2]) / prev_range
+    prev_upper_wick = (highs[-2] - max(opens[-2], closes[-2])) / prev_range
+
+    # Відсікаємо мікро-свічки (менше 40% від середньої волатильності ATR)
+    strong_move = prev_range >= (atr_val * 0.4)
+
+    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
+    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
+
+    # BUY на відскоку: різке падіння (RSI4 <= 25), знизу утворилася тінь викупу >= 32%, нова свічка пішла вгору
+    buy_cond = strong_move and (rsi4 <= 25) and (prev_lower_wick >= 0.32) and (closes[-1] >= opens[-1]) and tick_up
+
+    # SELL на відскоку: різкий ріст (RSI4 >= 75), зверху утворилася тінь тиску >= 32%, нова свічка пішла вниз
+    sell_cond = strong_move and (rsi4 >= 75) and (prev_upper_wick >= 0.32) and (closes[-1] <= opens[-1]) and tick_down
+
     now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
 
-    def pick_exp_m1(sec_val, rsi_val, is_buy):
-        impulse = (rsi_val - 50) if is_buy else (50 - rsi_val)
-        if sec_val <= 20 and impulse >= 7:
-            return "1m"
-        if sec_val <= 42:
-            return "2m"
-        return "5m"
+    def pick_exp_bounce(rsi4_val, is_buy, sec_val):
+        extreme = rsi4_val if is_buy else (100 - rsi4_val)
+        if extreme <= 12 and sec_val <= 8:
+            return "15s"
+        if extreme <= 20 and sec_val <= 13:
+            return "30s"
+        return "1m"
 
     if buy_cond:
-        rec_exp = pick_exp_m1(sec_in_1m, rsi6, True)
+        rec_exp = pick_exp_bounce(rsi4, True, sec_in_1m)
         sig_data = {
             "direction": "BUY",
             "rec_exp": rec_exp,
@@ -168,7 +183,7 @@ def analyze_pair_m1(sym, candles, recent_ticks):
             STATE["last_signals"][sym] = sig_data
 
     elif sell_cond:
-        rec_exp = pick_exp_m1(sec_in_1m, rsi6, False)
+        rec_exp = pick_exp_bounce(rsi4, False, sec_in_1m)
         sig_data = {
             "direction": "SELL",
             "rec_exp": rec_exp,
@@ -183,8 +198,8 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     return {
         "status": "READY",
         "price": closes[-1],
-        "rsi": round(rsi6, 1),
-        "cci": round(hist_now * 100000, 1),
+        "rsi": round(rsi4, 1),
+        "cci": round(rsi6, 1),
         "cur_bucket": cur_bucket
     }
 
