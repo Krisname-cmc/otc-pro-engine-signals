@@ -92,7 +92,7 @@ def calculate_macd_hist(closes, fast=5, slow=13, signal=4):
 
     def ema_series(vals, period):
         k = 2 / (period + 1)
-        res = [vals]
+        res = [vals[0]]
         for v in vals[1:]:
             res.append(v * k + res[-1] * (1 - k))
         return res
