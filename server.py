@@ -33,82 +33,27 @@ STATE = {
 }
 
 
-def calculate_rsi(closes, period=7):
-    if len(closes) < period + 1:
+def calculate_demarker(highs, lows, period=5):
+    """Розрахунок індикатора DeMarker (шкала від 0.00 до 1.00)"""
+    if len(highs) < period + 2:
         return None
-    gains, losses = [], []
+    de_max, de_min = [], []
     for i in range(-period, 0):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0.0))
-        losses.append(abs(min(diff, 0.0)))
-    avg_gain = statistics.mean(gains)
-    avg_loss = statistics.mean(losses)
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+        diff_h = highs[i] - highs[i - 1]
+        diff_l = lows[i - 1] - lows[i]
+        de_max.append(diff_h if diff_h > 0 else 0.0)
+        de_min.append(diff_l if diff_l > 0 else 0.0)
 
-
-def calculate_ema_and_atr(highs, lows, closes, period=12):
-    if len(closes) < period + 2:
-        return None, None, None
-    k = 2 / (period + 1)
-    ema_vals = [closes[0]]
-    for p in closes[1:]:
-        ema_vals.append(p * k + ema_vals[-1] * (1 - k))
-
-    trs = []
-    for i in range(-period, 0):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-        trs.append(tr)
-    atr_val = statistics.mean(trs)
-    return ema_vals[-1], ema_vals[-3], atr_val
-
-
-def calculate_stochastic(highs, lows, closes, k_period=8, smooth_k=2, smooth_d=2):
-    if len(closes) < k_period + smooth_k + smooth_d:
-        return None, None, None
-    raw_k = []
-    for i in range(k_period - 1, len(closes)):
-        l_min = min(lows[i - k_period + 1:i + 1])
-        h_max = max(highs[i - k_period + 1:i + 1])
-        raw_k.append(50.0 if h_max == l_min else ((closes[i] - l_min) / (h_max - l_min)) * 100.0)
-
-    k_line = [statistics.mean(raw_k[i - smooth_k + 1:i + 1]) for i in range(smooth_k - 1, len(raw_k))]
-    if len(k_line) < smooth_d + 1:
-        return None, None, None
-    d_now = statistics.mean(k_line[-smooth_d:])
-    return k_line[-1], k_line[-2], d_now
-
-
-def calculate_macd_hist(closes, fast=5, slow=13, signal=4):
-    """Швидкий MACD (5, 13, 4) для M1: повертає поточну та попередню гістограму"""
-    if len(closes) < slow + signal + 1:
-        return None, None
-
-    def ema_series(vals, period):
-        k = 2 / (period + 1)
-        res = [vals[0]]
-        for v in vals[1:]:
-            res.append(v * k + res[-1] * (1 - k))
-        return res
-
-    ema_fast = ema_series(closes, fast)
-    ema_slow = ema_series(closes, slow)
-    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
-    sig_line = ema_series(macd_line, signal)
-
-    hist_now = macd_line[-1] - sig_line[-1]
-    hist_prev = macd_line[-2] - sig_line[-2]
-    return hist_now, hist_prev
+    sum_max = sum(de_max)
+    sum_min = sum(de_min)
+    denom = sum_max + sum_min
+    if denom == 0:
+        return 0.5
+    return sum_max / denom
 
 
 def analyze_pair_m1(sym, candles, recent_ticks):
-    """M1 Відбій від виснаження на OTC: RSI(4) Extreme + Тінь розвороту + Старт свічки -> 1m / 2m / 5m"""
+    """M1 Відбій на відкритті свічки: DeMarker(5) + Тінь виснаження + ATR -> 15s / 30s / 1m"""
     if not candles or len(candles) < 12:
         return {
             "status": "WARMING",
@@ -123,24 +68,83 @@ def analyze_pair_m1(sym, candles, recent_ticks):
     closes = [float(x["close"]) for x in candles]
 
     ema_now, ema_prev, atr_val = calculate_ema_and_atr(highs, lows, closes, period=10)
-    rsi4 = calculate_rsi(closes, period=4)
-    rsi6 = calculate_rsi(closes, period=6)
+    dem5 = calculate_demarker(highs, lows, period=5)
+    dem3 = calculate_demarker(highs, lows, period=3)
 
-    if ema_now is None or rsi4 is None or rsi6 is None or atr_val <= 0:
+    if ema_now is None or dem5 is None or dem3 is None or atr_val <= 0:
         return {"status": "SCAN", "price": closes[-1]}
 
     cur_bucket = candles[-1]["time"]
     sec_in_1m = int(time.time()) % 60
 
-    # 1. Заходимо ТІЛЬКИ у перші 18 секунд нової свічки, щоб зловити весь відскок з самого початку
+    # Вхід тільки у перші 18 секунд нової свічки
     if sec_in_1m > 18:
         return {
             "status": "READY",
             "price": closes[-1],
-            "rsi": round(rsi4, 1),
-            "cci": round(rsi6, 1),
+            "rsi": round(dem5, 2),
+            "cci": round(dem3, 2),
             "cur_bucket": cur_bucket
         }
+
+    prev_range = max(highs[-2] - lows[-2], 1e-9)
+    prev_lower_wick = (min(opens[-2], closes[-2]) - lows[-2]) / prev_range
+    prev_upper_wick = (highs[-2] - max(opens[-2], closes[-2])) / prev_range
+
+    strong_move = prev_range >= (atr_val * 0.35)
+
+    tick_up = len(recent_ticks) >= 2 and recent_ticks[-1] > recent_ticks[-2]
+    tick_down = len(recent_ticks) >= 2 and recent_ticks[-1] < recent_ticks[-2]
+
+    # BUY: DeMarker(5) у зоні перепроданості (<= 0.18), є нижня тінь відкупу >= 30%, нова свічка росте
+    buy_cond = strong_move and (dem5 <= 0.18) and (prev_lower_wick >= 0.30) and (closes[-1] >= opens[-1]) and tick_up
+
+    # SELL: DeMarker(5) у зоні перекупленості (>= 0.82), є верхня тінь тиску >= 30%, нова свічка падає
+    sell_cond = strong_move and (dem5 >= 0.82) and (prev_upper_wick >= 0.30) and (closes[-1] <= opens[-1]) and tick_down
+
+    now_str = datetime.now(KYIV_TZ).strftime("%H:%M")
+
+    def pick_exp_dem(dem_val, is_buy, sec_val):
+        extreme = dem_val if is_buy else (1.0 - dem_val)
+        if extreme <= 0.08 and sec_val <= 8:
+            return "15s"
+        if extreme <= 0.14 and sec_val <= 13:
+            return "30s"
+        return "1m"
+
+    if buy_cond:
+        rec_exp = pick_exp_dem(dem5, True, sec_in_1m)
+        sig_data = {
+            "direction": "BUY",
+            "rec_exp": rec_exp,
+            "time": now_str,
+            "bucket": cur_bucket,
+            "ts": time.time()
+        }
+        prev_saved = STATE["last_signals"].get(sym)
+        if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "BUY":
+            STATE["last_signals"][sym] = sig_data
+
+    elif sell_cond:
+        rec_exp = pick_exp_dem(dem5, False, sec_in_1m)
+        sig_data = {
+            "direction": "SELL",
+            "rec_exp": rec_exp,
+            "time": now_str,
+            "bucket": cur_bucket,
+            "ts": time.time()
+        }
+        prev_saved = STATE["last_signals"].get(sym)
+        if not prev_saved or prev_saved.get("bucket") != cur_bucket or prev_saved.get("direction") != "SELL":
+            STATE["last_signals"][sym] = sig_data
+
+    return {
+        "status": "READY",
+        "price": closes[-1],
+        "rsi": round(dem5, 2),
+        "cci": round(dem3, 2),
+        "cur_bucket": cur_bucket
+    }
 
     # 2. Перевіряємо тінь відскоку на щойно закритій свічці (candles[-2])
     prev_range = max(highs[-2] - lows[-2], 1e-9)
